@@ -1,0 +1,6 @@
+{
+  "name": "TruthPulse AI",
+  "description": "Intelligent News, Data Analysis, Source Tracking, and Fact Verification Platform with real-time editorial newsroom and AI inspection engine.",
+  "requestFramePermissions": [],
+  "majorCapabilities": ["MAJOR_CAPABILITY_SERVER_SIDE_GEMINI_API"]
+}
