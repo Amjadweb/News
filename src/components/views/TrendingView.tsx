@@ -23,7 +23,7 @@ export const TrendingView: React.FC = () => {
         fetchArticlesSafe({ sort: 'Trending' }),
       ]);
       setTrending(fetchedTrending);
-      setArticles(fetchedNews);
+      setArticles(fetchedNews.articles || []);
     } catch (err) {
       console.warn('Using cached trending data');
     } finally {

@@ -28,6 +28,7 @@ interface AppContextType {
   hasRolePermission: (permission: string) => boolean;
   savedArticles: string[];
   toggleSaveArticle: (id: string) => void;
+  clearAllSavedArticles: () => void;
   toasts: Toast[];
   addToast: (message: string, type?: 'success' | 'error' | 'info') => void;
   removeToast: (id: string) => void;
@@ -80,7 +81,20 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
     'FACT_CHECK_MANAGE',
   ]);
 
-  const [savedArticles, setSavedArticles] = useState<string[]>([]);
+  const [savedArticles, setSavedArticles] = useState<string[]>(() => {
+    try {
+      const saved = localStorage.getItem('truthpulse_saved_articles');
+      if (saved) {
+        const parsed = JSON.parse(saved);
+        if (Array.isArray(parsed)) {
+          return parsed.filter((item): item is string => typeof item === 'string');
+        }
+      }
+    } catch (e) {
+      console.warn('Could not read saved articles from localStorage', e);
+    }
+    return [];
+  });
   const [toasts, setToasts] = useState<Toast[]>([]);
 
   // Apply dark mode class to html element
@@ -235,14 +249,46 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
   const toggleSaveArticle = (id: string) => {
     setSavedArticles((prev) => {
       const exists = prev.includes(id);
+      let updated: string[];
       if (exists) {
-        addToast('Article removed from saved items', 'info');
-        return prev.filter((item) => item !== id);
+        updated = prev.filter((item) => item !== id);
+        addToast(
+          language === 'bn'
+            ? 'সংরক্ষিত তালিকা থেকে সরানো হয়েছে'
+            : 'Article removed from saved items',
+          'info'
+        );
       } else {
-        addToast('Article saved to your reading list', 'success');
-        return [...prev, id];
+        updated = [...prev, id];
+        addToast(
+          language === 'bn'
+            ? 'সংরক্ষিত তালিকায় যোগ করা হয়েছে'
+            : 'Article saved to your reading list',
+          'success'
+        );
       }
+      try {
+        localStorage.setItem('truthpulse_saved_articles', JSON.stringify(updated));
+      } catch (e) {
+        console.warn('Could not save articles to localStorage', e);
+      }
+      return updated;
     });
+  };
+
+  const clearAllSavedArticles = () => {
+    setSavedArticles([]);
+    try {
+      localStorage.removeItem('truthpulse_saved_articles');
+    } catch (e) {
+      console.warn('Could not clear saved articles from localStorage', e);
+    }
+    addToast(
+      language === 'bn'
+        ? 'সকল সংরক্ষিত সংবাদ মুছে ফেলা হয়েছে'
+        : 'All saved articles have been cleared',
+      'info'
+    );
   };
 
   const addToast = (message: string, type: 'success' | 'error' | 'info' = 'info') => {
@@ -298,6 +344,7 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
         hasRolePermission,
         savedArticles,
         toggleSaveArticle,
+        clearAllSavedArticles,
         toasts,
         addToast,
         removeToast,

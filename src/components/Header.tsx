@@ -50,6 +50,7 @@ export const Header: React.FC = () => {
     { key: 'category', payload: { category: 'Business' }, label: t.navBusiness },
     { key: 'fact-check', label: t.navFactCheck },
     { key: 'analyzer', label: t.navAnalyzer },
+    { key: 'saved', label: t.navSaved || 'Saved' },
   ];
 
   return (
@@ -172,13 +173,18 @@ export const Header: React.FC = () => {
 
               {/* Saved Articles Shortcut (Desktop) */}
               <button
-                onClick={() => navigateTo('search', { savedOnly: true })}
+                onClick={() => navigateTo('saved')}
                 title="Saved reading list"
-                className="hidden sm:flex relative p-2 rounded-lg bg-slate-100 dark:bg-slate-800 text-slate-600 dark:text-slate-300 hover:bg-slate-200 dark:hover:bg-slate-700 border border-slate-200 dark:border-slate-700 transition-colors"
+                aria-label="Saved reading list"
+                className={`hidden sm:flex relative p-2 rounded-lg transition-colors border ${
+                  currentView === 'saved'
+                    ? 'bg-red-50 text-red-600 border-red-300 dark:bg-red-950/60 dark:text-red-400 dark:border-red-800 shadow-xs'
+                    : 'bg-slate-100 dark:bg-slate-800 text-slate-600 dark:text-slate-300 hover:bg-slate-200 dark:hover:bg-slate-700 border-slate-200 dark:border-slate-700'
+                }`}
               >
                 <Bookmark className="w-4 h-4" />
                 {savedArticles.length > 0 && (
-                  <span className="absolute -top-1 -right-1 w-4 h-4 bg-red-600 text-white rounded-full text-[10px] font-bold flex items-center justify-center">
+                  <span className="absolute -top-1 -right-1 min-w-4 h-4 px-1 bg-red-600 text-white rounded-full text-[10px] font-bold flex items-center justify-center">
                     {savedArticles.length}
                   </span>
                 )}
@@ -217,7 +223,13 @@ export const Header: React.FC = () => {
                     {item.key === 'today' && <Radio className="w-3 h-3 text-red-500 animate-pulse" />}
                     {item.key === 'fact-check' && <CheckCircle2 className="w-3 h-3 text-emerald-500" />}
                     {item.key === 'analyzer' && <BarChart3 className="w-3 h-3 text-teal-500" />}
+                    {item.key === 'saved' && <Bookmark className="w-3 h-3 text-amber-500" />}
                     <span>{item.label}</span>
+                    {item.key === 'saved' && savedArticles.length > 0 && (
+                      <span className="ml-1 px-1.5 py-0.2 bg-red-600 text-white rounded-full text-[9px] font-bold">
+                        {savedArticles.length}
+                      </span>
+                    )}
                   </button>
                 );
               })}

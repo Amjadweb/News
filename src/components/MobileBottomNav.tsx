@@ -77,6 +77,11 @@ export const MobileBottomNav: React.FC = () => {
     navigateTo('search');
   };
 
+  const handleSavedClick = () => {
+    setActiveSheet('none');
+    navigateTo('saved');
+  };
+
   const handleCategorySelect = (category: NewsCategory) => {
     setActiveSheet('none');
     navigateTo('category', { category });
@@ -96,6 +101,7 @@ export const MobileBottomNav: React.FC = () => {
 
   const isHomeActive = currentView === 'home' && activeSheet === 'none';
   const isSearchActive = currentView === 'search' && activeSheet === 'none';
+  const isSavedActive = currentView === 'saved' && activeSheet === 'none';
   const isCategoriesActive = activeSheet === 'categories' || currentView === 'category';
   const isProfileActive = activeSheet === 'profile' || currentView === 'admin';
 
@@ -104,13 +110,13 @@ export const MobileBottomNav: React.FC = () => {
       {/* Persistent Bottom Bar (Mobile/Tablet Only) */}
       <nav
         aria-label="Mobile Bottom Navigation"
-        className="fixed bottom-0 left-0 right-0 z-40 lg:hidden bg-white/95 dark:bg-slate-900/95 backdrop-blur-md border-t border-slate-200 dark:border-slate-800 shadow-lg px-2 py-1.5 transition-colors"
+        className="fixed bottom-0 left-0 right-0 z-40 lg:hidden bg-white/95 dark:bg-slate-900/95 backdrop-blur-md border-t border-slate-200 dark:border-slate-800 shadow-lg px-1 sm:px-2 py-1.5 transition-colors"
       >
-        <div className="max-w-md mx-auto grid grid-cols-4 items-center">
+        <div className="max-w-md mx-auto grid grid-cols-5 items-center">
           {/* 1. HOME TAB */}
           <button
             onClick={handleHomeClick}
-            className={`flex flex-col items-center justify-center py-1 px-2 rounded-xl transition-all ${
+            className={`flex flex-col items-center justify-center py-1 px-1 rounded-xl transition-all ${
               isHomeActive
                 ? 'text-red-600 dark:text-red-400 font-bold scale-105'
                 : 'text-slate-600 dark:text-slate-400 hover:text-slate-900 dark:hover:text-slate-200'
@@ -130,7 +136,7 @@ export const MobileBottomNav: React.FC = () => {
           {/* 2. SEARCH TAB */}
           <button
             onClick={handleSearchClick}
-            className={`flex flex-col items-center justify-center py-1 px-2 rounded-xl transition-all ${
+            className={`flex flex-col items-center justify-center py-1 px-1 rounded-xl transition-all ${
               isSearchActive
                 ? 'text-red-600 dark:text-red-400 font-bold scale-105'
                 : 'text-slate-600 dark:text-slate-400 hover:text-slate-900 dark:hover:text-slate-200'
@@ -138,9 +144,6 @@ export const MobileBottomNav: React.FC = () => {
           >
             <div className="relative">
               <Search className={`w-5 h-5 ${isSearchActive ? 'stroke-[2.5]' : 'stroke-2'}`} />
-              {savedArticles.length > 0 && !isSearchActive && (
-                <span className="absolute -top-1 -right-1 w-2 h-2 rounded-full bg-red-600"></span>
-              )}
               {isSearchActive && (
                 <span className="absolute -bottom-1 left-1/2 -translate-x-1/2 w-1.5 h-1.5 rounded-full bg-red-600"></span>
               )}
@@ -150,10 +153,35 @@ export const MobileBottomNav: React.FC = () => {
             </span>
           </button>
 
-          {/* 3. CATEGORIES TAB */}
+          {/* 3. SAVED TAB */}
+          <button
+            onClick={handleSavedClick}
+            className={`flex flex-col items-center justify-center py-1 px-1 rounded-xl transition-all ${
+              isSavedActive
+                ? 'text-red-600 dark:text-red-400 font-bold scale-105'
+                : 'text-slate-600 dark:text-slate-400 hover:text-slate-900 dark:hover:text-slate-200'
+            }`}
+          >
+            <div className="relative">
+              <Bookmark className={`w-5 h-5 ${isSavedActive ? 'stroke-[2.5]' : 'stroke-2'}`} />
+              {savedArticles.length > 0 && (
+                <span className="absolute -top-1 -right-1.5 min-w-3.5 h-3.5 px-0.5 rounded-full bg-red-600 text-white text-[8px] font-bold flex items-center justify-center">
+                  {savedArticles.length}
+                </span>
+              )}
+              {isSavedActive && (
+                <span className="absolute -bottom-1 left-1/2 -translate-x-1/2 w-1.5 h-1.5 rounded-full bg-red-600"></span>
+              )}
+            </div>
+            <span className="text-[10px] mt-1 font-medium tracking-tight">
+              {t.bottomNavSaved || 'Saved'}
+            </span>
+          </button>
+
+          {/* 4. CATEGORIES TAB */}
           <button
             onClick={() => setActiveSheet(activeSheet === 'categories' ? 'none' : 'categories')}
-            className={`flex flex-col items-center justify-center py-1 px-2 rounded-xl transition-all ${
+            className={`flex flex-col items-center justify-center py-1 px-1 rounded-xl transition-all ${
               isCategoriesActive
                 ? 'text-red-600 dark:text-red-400 font-bold scale-105'
                 : 'text-slate-600 dark:text-slate-400 hover:text-slate-900 dark:hover:text-slate-200'
@@ -170,10 +198,10 @@ export const MobileBottomNav: React.FC = () => {
             </span>
           </button>
 
-          {/* 4. PROFILE TAB */}
+          {/* 5. PROFILE TAB */}
           <button
             onClick={() => setActiveSheet(activeSheet === 'profile' ? 'none' : 'profile')}
-            className={`flex flex-col items-center justify-center py-1 px-2 rounded-xl transition-all ${
+            className={`flex flex-col items-center justify-center py-1 px-1 rounded-xl transition-all ${
               isProfileActive
                 ? 'text-red-600 dark:text-red-400 font-bold scale-105'
                 : 'text-slate-600 dark:text-slate-400 hover:text-slate-900 dark:hover:text-slate-200'
@@ -369,7 +397,7 @@ export const MobileBottomNav: React.FC = () => {
                 <button
                   onClick={() => {
                     setActiveSheet('none');
-                    navigateTo('search', { savedOnly: true });
+                    navigateTo('saved');
                   }}
                   className="w-full flex items-center justify-between p-3 rounded-xl bg-slate-50 dark:bg-slate-800/60 border border-slate-200 dark:border-slate-800 text-xs font-bold text-slate-900 dark:text-white"
                 >

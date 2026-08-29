@@ -11,14 +11,16 @@ import {
   ROLE_PERMISSIONS,
   AuthenticatedRequest,
 } from './server/auth';
-import { UserRole } from './src/types';
+import { UserRole, NewsArticle } from './src/types';
 import {
   verifyClaimWithAI,
   analyzeDatasetWithAI,
   askDataQuestionAI,
   askEditorialAssistantAI,
 } from './server/gemini';
+import { initializeScheduler, runFullSyncCycle, getSyncStatus } from './server/services/scheduler';
 import { runIngestionPipeline } from './server/ingestion';
+import { generateSlug } from './server/services/newsProcessor';
 
 dotenv.config();
 
@@ -29,6 +31,9 @@ async function startServer() {
   app.use(express.json({ limit: '25mb' }));
   app.use(express.urlencoded({ extended: true, limit: '25mb' }));
 
+  // Initialize automated background scheduler (runs 12h expiry & RSS poll every 10-15 min)
+  initializeScheduler();
+
   // ==========================================
   // PUBLIC API ROUTES
   // ==========================================
@@ -38,36 +43,61 @@ async function startServer() {
     res.json({
       status: 'ok',
       service: 'TruthPulse AI Platform',
-      version: '1.0.0',
+      version: '2.0.0',
       timestamp: new Date().toISOString(),
       timezone: 'Asia/Dhaka',
+      syncStatus: getSyncStatus(),
     });
   });
 
-  // Get News Articles (Public)
-  app.get('/api/news', (req, res) => {
-    const { category, search, verificationStatus, sort } = req.query as Record<string, string>;
-    let articles = db.getArticles({
-      category,
-      search,
-      verificationStatus,
-      status: 'Published',
+  // Dynamic Live Sync & Expiry Status
+  app.get('/api/news/sync-status', (req, res) => {
+    res.json({
+      success: true,
+      status: getSyncStatus(),
     });
+  });
 
-    if (sort === 'Important') {
-      articles = [...articles].sort((a, b) => b.importanceScore - a.importanceScore);
-    } else if (sort === 'Trending') {
-      articles = [...articles].sort((a, b) => (b.isTrending ? 1 : 0) - (a.isTrending ? 1 : 0));
-    } else if (sort === 'Most Read') {
-      articles = [...articles].sort((a, b) => b.viewsCount - a.viewsCount);
-    } else if (sort === 'Recently Updated') {
-      articles = [...articles].sort((a, b) => new Date(b.updatedAt).getTime() - new Date(a.updatedAt).getTime());
-    }
+  // Dynamic Top 15-20 Ranked News Stories
+  app.get('/api/news/top', (req, res) => {
+    const { limit = '20', category } = req.query as Record<string, string>;
+    const parsedLimit = Math.min(50, Math.max(5, parseInt(limit, 10) || 20));
+    const articles = db.getTopNews(parsedLimit, category);
+    const syncStatus = getSyncStatus();
 
     res.json({
       success: true,
       total: articles.length,
+      limit: parsedLimit,
+      category: category || 'All',
+      syncStatus,
       articles,
+    });
+  });
+
+  // Get News Articles (Public Dynamic Feed)
+  app.get('/api/news', (req, res) => {
+    const { category, search, verificationStatus, sort, limit = '50', page = '1' } = req.query as Record<string, string>;
+    const articles = db.getArticles({
+      category,
+      search,
+      verificationStatus,
+      sort: sort || 'Dynamic Ranked',
+      includeExpired: false,
+    });
+
+    const parsedLimit = parseInt(limit, 10) || 50;
+    const parsedPage = parseInt(page, 10) || 1;
+    const startIndex = (parsedPage - 1) * parsedLimit;
+    const paginated = articles.slice(startIndex, startIndex + parsedLimit);
+
+    res.json({
+      success: true,
+      total: articles.length,
+      page: parsedPage,
+      pageSize: paginated.length,
+      syncStatus: getSyncStatus(),
+      articles: paginated,
     });
   });
 
@@ -558,12 +588,176 @@ async function startServer() {
     }
   );
 
+  // Create Manual News Article (Requires OWNER or EDITOR role)
+  app.post(
+    '/api/admin/news/create',
+    authenticateToken,
+    requireRole(['OWNER', 'EDITOR']),
+    (req: AuthenticatedRequest, res: Response) => {
+      const {
+        title,
+        titleBn,
+        summary,
+        summaryBn,
+        content,
+        category,
+        tags,
+        imageUrl,
+        sourceName,
+        sourceUrl,
+        isBreaking,
+        isTrending,
+        isEditorPick,
+        importanceScore,
+        confidenceScore,
+        verificationStatus,
+        keyFacts,
+        status,
+        autoExpire,
+      } = req.body;
+
+      if (!title || !summary) {
+        return res.status(400).json({ success: false, error: 'Title and summary are required' });
+      }
+
+      const actor = req.user!;
+      const nowStr = new Date().toISOString();
+      const slug = generateSlug(title);
+
+      const primarySource = {
+        id: `src_manual_${Date.now()}`,
+        name: sourceName || 'TruthPulse Direct Bureau',
+        url: sourceUrl || 'https://truthpulse.ai',
+        publisher: sourceName || 'TruthPulse Newsroom',
+        domain: 'truthpulse.ai',
+        publishedAt: nowStr,
+        retrievedAt: nowStr,
+        sourceType: 'Manual Editorial' as const,
+        reliabilityScore: 98,
+        isPrimary: true,
+      };
+
+      const newArticle: NewsArticle = {
+        id: `art_${Date.now()}_${Math.random().toString(36).substring(2, 6)}`,
+        slug,
+        title,
+        titleBn: titleBn || title,
+        summary,
+        summaryBn: summaryBn || summary,
+        content: content || summary,
+        category: category || 'Bangladesh',
+        tags: Array.isArray(tags) ? tags : [category || 'General'],
+        imageUrl:
+          imageUrl ||
+          'https://images.unsplash.com/photo-1504711434969-e33886168f5c?w=1200&auto=format&fit=crop&q=80',
+        publishedAt: nowStr,
+        createdAt: nowStr,
+        updatedAt: nowStr,
+        retrievedAt: nowStr,
+        status: status || 'Published',
+        verificationStatus: verificationStatus || 'Verified',
+        confidenceScore: confidenceScore || 95,
+        importanceScore: importanceScore || 85,
+        viewsCount: 1,
+        isBreaking: Boolean(isBreaking),
+        isTrending: Boolean(isTrending),
+        isEditorPick: Boolean(isEditorPick),
+        isManual: true,
+        autoExpire: Boolean(autoExpire),
+        aiGenerated: false,
+        sourceName: sourceName || 'TruthPulse Editorial Bureau',
+        sourceUrl: sourceUrl || 'https://truthpulse.ai',
+        byline: actor.name,
+        location: 'Dhaka, Bangladesh',
+        primarySource,
+        sourceComparison: {
+          totalChecked: 1,
+          supporting: 1,
+          conflicting: 0,
+          sources: [primarySource],
+          primarySourceAvailable: true,
+        },
+        keyFacts: Array.isArray(keyFacts) && keyFacts.length > 0 ? keyFacts : [summary],
+        extractedClaims: [],
+      };
+
+      const saved = db.addArticle(newArticle);
+
+      db.addAuditLog({
+        actorId: actor.id,
+        actorName: actor.name,
+        actorRole: actor.role,
+        action: 'MANUAL_ARTICLE_PUBLISHED',
+        entityType: 'Article',
+        entityId: saved.id,
+        newValue: `Published: ${saved.title} (${saved.category})`,
+      });
+
+      res.json({ success: true, article: saved });
+    }
+  );
+
+  // Delete Article (Requires OWNER role)
+  app.delete(
+    '/api/admin/news/:id',
+    authenticateToken,
+    requireRole(['OWNER']),
+    (req: AuthenticatedRequest, res: Response) => {
+      const { id } = req.params;
+      const actor = req.user!;
+
+      const success = db.deleteArticle(id, actor);
+      if (!success) {
+        return res.status(404).json({ success: false, error: 'Article not found' });
+      }
+
+      res.json({ success: true, message: 'Article deleted successfully' });
+    }
+  );
+
+  // Trigger Full Dynamic Ingestion & 12-Hour Expiration Pipeline
+  app.post(
+    '/api/admin/pipeline/trigger',
+    authenticateToken,
+    requireRole(['OWNER', 'EDITOR']),
+    async (req: AuthenticatedRequest, res: Response) => {
+      const actor = req.user!;
+      try {
+        const result = await runFullSyncCycle(`MANUAL_ADMIN_${actor.role}`);
+        res.json({ success: true, ...result, syncStatus: getSyncStatus() });
+      } catch (err: any) {
+        console.error('Pipeline trigger error:', err);
+        res.status(500).json({ success: false, error: err.message || 'Pipeline trigger failed' });
+      }
+    }
+  );
+
+  // Seed 20-Story Dynamic Rotation Test Scenario (Step 22)
+  app.post(
+    '/api/admin/test-rotation',
+    authenticateToken,
+    requireRole(['OWNER', 'EDITOR']),
+    async (req: AuthenticatedRequest, res: Response) => {
+      const actor = req.user!;
+      const result = db.seedScenarioTestData(actor);
+      // Run expiry check to show 12-hour expiration in real-time
+      const syncResult = await runFullSyncCycle('TEST_SCENARIO_EXPIRY_DEMO');
+      res.json({
+        success: true,
+        seededCount: result.count,
+        syncResult,
+        topNews: db.getTopNews(20),
+        syncStatus: getSyncStatus(),
+      });
+    }
+  );
+
   // Sources Management: View (All staff)
   app.get('/api/admin/sources', authenticateToken, (req: AuthenticatedRequest, res: Response) => {
     res.json({ success: true, sources: db.sources });
   });
 
-  // Sources Management: Create / Update (Restricted to OWNER role only)
+  // Sources Management: Create (Restricted to OWNER role only)
   app.post(
     '/api/admin/sources',
     authenticateToken,
@@ -576,39 +770,45 @@ async function startServer() {
         return res.status(400).json({ success: false, error: 'Source name and URL are required' });
       }
 
-      const existingIdx = db.sources.findIndex((s) => s.id === source.id);
-      if (existingIdx !== -1) {
-        db.sources[existingIdx] = { ...db.sources[existingIdx], ...source };
-      } else {
-        const newSource = {
-          id: `src_${Date.now()}`,
-          name: source.name,
-          feedUrl: source.feedUrl,
-          category: source.category || 'Technology',
-          country: source.country || 'Bangladesh',
-          language: source.language || 'English',
-          isActive: source.isActive !== undefined ? source.isActive : true,
-          fetchFrequencyMinutes: source.fetchFrequencyMinutes || 15,
-          lastSuccessfulFetch: new Date().toISOString(),
-          lastFetchAttempt: new Date().toISOString(),
-          errorCount: 0,
-          healthStatus: 'Healthy' as const,
-          totalArticlesCollected: 0,
-        };
-        db.sources.push(newSource);
+      const created = db.addSource(source, actor);
+      res.json({ success: true, source: created, sources: db.sources });
+    }
+  );
+
+  // Sources Management: Update (Restricted to OWNER role only)
+  app.put(
+    '/api/admin/sources/:id',
+    authenticateToken,
+    requireRole(['OWNER']),
+    (req: AuthenticatedRequest, res: Response) => {
+      const { id } = req.params;
+      const { updates } = req.body;
+      const actor = req.user!;
+
+      const updated = db.updateSource(id, updates || {}, actor);
+      if (!updated) {
+        return res.status(404).json({ success: false, error: 'Source not found' });
       }
 
-      db.addAuditLog({
-        actorId: actor.id,
-        actorName: actor.name,
-        actorRole: actor.role,
-        action: 'SOURCE_CONFIG_UPDATED',
-        entityType: 'Source',
-        entityId: source.id || 'new',
-        newValue: `Source: ${source.name}`,
-      });
+      res.json({ success: true, source: updated, sources: db.sources });
+    }
+  );
 
-      res.json({ success: true, sources: db.sources });
+  // Sources Management: Delete (Restricted to OWNER role only)
+  app.delete(
+    '/api/admin/sources/:id',
+    authenticateToken,
+    requireRole(['OWNER']),
+    (req: AuthenticatedRequest, res: Response) => {
+      const { id } = req.params;
+      const actor = req.user!;
+
+      const success = db.deleteSource(id, actor);
+      if (!success) {
+        return res.status(404).json({ success: false, error: 'Source not found' });
+      }
+
+      res.json({ success: true, message: 'Source deleted successfully', sources: db.sources });
     }
   );
 

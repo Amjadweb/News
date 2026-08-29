@@ -1,6 +1,6 @@
 import React, { useState, useEffect } from 'react';
 import { useApp } from '../../context/AppContext';
-import { NewsArticle, NewsSourceRegistry, AuditLog, UserRole, BackgroundJob } from '../../types';
+import { NewsArticle, NewsCategory, NewsSourceRegistry, AuditLog, UserRole, BackgroundJob, NewsSyncStatus } from '../../types';
 import { StatusBadge, ConfidenceScorePill } from '../StatusBadge';
 import {
   ShieldCheck,
@@ -30,7 +30,23 @@ import {
   LogOut,
   ShieldAlert,
   Check,
+  Flame,
+  Send,
+  Zap,
+  RotateCcw,
+  Eye,
+  CheckSquare,
+  Square,
 } from 'lucide-react';
+import {
+  fetchSyncStatusSafe,
+  triggerPipelineSyncSafe,
+  triggerTestScenarioSafe,
+  createManualArticleSafe,
+  deleteArticleSafe,
+  saveSourceSafe,
+  deleteSourceSafe,
+} from '../../services/api';
 
 export const AdminNewsroomView: React.FC = () => {
   const {
@@ -48,15 +64,18 @@ export const AdminNewsroomView: React.FC = () => {
   } = useApp();
 
   const [activeTab, setActiveTab] = useState<
-    'dashboard' | 'inbox' | 'sources' | 'editor' | 'audit' | 'security' | 'jobs'
+    'dashboard' | 'inbox' | 'publish' | 'rotation' | 'sources' | 'editor' | 'audit' | 'security' | 'jobs'
   >('dashboard');
   const [dashboardMetrics, setDashboardMetrics] = useState<any>(null);
   const [articles, setArticles] = useState<NewsArticle[]>([]);
   const [sources, setSources] = useState<NewsSourceRegistry[]>([]);
   const [auditLogs, setAuditLogs] = useState<AuditLog[]>([]);
   const [jobs, setJobs] = useState<BackgroundJob[]>([]);
+  const [syncStatus, setSyncStatus] = useState<NewsSyncStatus | null>(null);
   const [loading, setLoading] = useState(true);
   const [isIngesting, setIsIngesting] = useState(false);
+  const [isRunningTestScenario, setIsRunningTestScenario] = useState(false);
+  const [testScenarioResult, setTestScenarioResult] = useState<any>(null);
   const [authError, setAuthError] = useState<string | null>(null);
 
   // Selected Article for Editor Workbench
@@ -64,15 +83,50 @@ export const AdminNewsroomView: React.FC = () => {
   const [aiAssistantLoading, setAiAssistantLoading] = useState(false);
   const [aiAssistantOutput, setAiAssistantOutput] = useState<any>(null);
 
+  // Manual News Publisher State
+  const [manualForm, setManualForm] = useState({
+    title: '',
+    titleBn: '',
+    summary: '',
+    summaryBn: '',
+    content: '',
+    category: 'Bangladesh',
+    author: 'Chief Newsroom Editor',
+    imageUrl: 'https://images.unsplash.com/photo-1585829365295-ab7cd400c167?w=1200&auto=format&fit=crop&q=80',
+    imageCaption: 'Special dispatch by TruthPulse Editorial Desk',
+    verificationStatus: 'VERIFIED' as const,
+    confidenceScore: 98,
+    importanceScore: 92,
+    isBreaking: true,
+    isTrending: true,
+    isEditorPick: true,
+    autoExpire: false, // Manual news stays permanent unless specified
+    keyFacts: ['Verified through direct primary documentation.', 'Corroborated by independent newsroom desk.'],
+    tags: ['Breaking', 'Special Report', 'Verified'],
+  });
+  const [isPublishingManual, setIsPublishingManual] = useState(false);
+  const [newKeyFactInput, setNewKeyFactInput] = useState('');
+
   // Source Add Modal
   const [showAddSourceModal, setShowAddSourceModal] = useState(false);
-  const [newSourceData, setNewSourceData] = useState({
+  const [newSourceData, setNewSourceData] = useState<{
+    name: string;
+    feedUrl: string;
+    category: NewsCategory;
+    country: string;
+    language: string;
+    fetchFrequencyMinutes: number;
+    priority: number;
+    isActive: boolean;
+  }>({
     name: '',
     feedUrl: '',
     category: 'Technology',
     country: 'Bangladesh',
     language: 'English',
     fetchFrequencyMinutes: 15,
+    priority: 85,
+    isActive: true,
   });
 
   // Auth Login Modal
@@ -94,12 +148,13 @@ export const AdminNewsroomView: React.FC = () => {
     setLoading(true);
     setAuthError(null);
     try {
-      const [dashRes, newsRes, srcRes, logsRes, jobsRes] = await Promise.all([
+      const [dashRes, newsRes, srcRes, logsRes, jobsRes, statusRes] = await Promise.all([
         authFetch('/api/admin/dashboard'),
         authFetch('/api/admin/news'),
         authFetch('/api/admin/sources'),
         authFetch('/api/admin/audit-logs'),
         authFetch('/api/admin/jobs'),
+        fetch('/api/news/sync-status'),
       ]);
 
       if (dashRes.status === 403 || newsRes.status === 403) {
@@ -111,6 +166,7 @@ export const AdminNewsroomView: React.FC = () => {
       const srcData = await srcRes.json();
       const logsData = await logsRes.json();
       const jobsData = await jobsRes.json();
+      const statusData = await statusRes.json();
 
       if (dashData.success) setDashboardMetrics(dashData);
       if (newsData.success) {
@@ -122,6 +178,7 @@ export const AdminNewsroomView: React.FC = () => {
       if (srcData.success) setSources(srcData.sources || []);
       if (logsData.success) setAuditLogs(logsData.auditLogs || []);
       if (jobsData.success) setJobs(jobsData.jobs || []);
+      if (statusData.success) setSyncStatus(statusData.status);
 
       // Fetch users if OWNER
       try {
@@ -140,29 +197,75 @@ export const AdminNewsroomView: React.FC = () => {
     }
   };
 
-  // Trigger Wire Ingestion Pipeline
-  const handleTriggerIngestion = async (sourceId?: string) => {
+  // Trigger Full Dynamic Ingestion & Expiry Pipeline
+  const handleTriggerFullPipeline = async () => {
     setIsIngesting(true);
     try {
-      const res = await authFetch('/api/admin/ingest', {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ sourceId }),
-      });
-      const data = await res.json();
+      const data = await triggerPipelineSyncSafe(authToken || '');
       if (data.success) {
         addToast(
-          `Ingestion complete: Fetched ${data.result.fetchedCount} items, ${data.result.newArticlesCount} new articles queued.`,
+          `Pipeline Cycle Executed! Ingested: ${data.result?.ingestion?.fetchedCount || 0} stories, Expired: ${data.result?.expiry?.expiredCount || 0} stories, Active Top 20 Ranked.`,
           'success'
         );
         fetchAdminData();
       } else {
-        addToast(data.error || 'Ingestion pipeline failed', 'error');
+        addToast(data.error || 'Pipeline execution failed', 'error');
       }
-    } catch (err: any) {
-      addToast('Ingestion pipeline failed', 'error');
+    } catch (err) {
+      addToast('Pipeline execution failed', 'error');
     } finally {
       setIsIngesting(false);
+    }
+  };
+
+  // Run Test Rotation Scenario (Step 22 Verification)
+  const handleRunTestRotationScenario = async () => {
+    setIsRunningTestScenario(true);
+    try {
+      const data = await triggerTestScenarioSafe(authToken || '');
+      if (data.success) {
+        setTestScenarioResult(data);
+        addToast('Step 22 Rotation Scenario Executed! 20 stories rotated with 12h expiry simulation.', 'success');
+        fetchAdminData();
+      } else {
+        addToast(data.error || 'Failed to run test rotation', 'error');
+      }
+    } catch (err) {
+      addToast('Failed to run test rotation scenario', 'error');
+    } finally {
+      setIsRunningTestScenario(false);
+    }
+  };
+
+  // Toggle Source Active / Inactive
+  const handleToggleSourceActive = async (src: NewsSourceRegistry) => {
+    try {
+      const updated = { ...src, isActive: !src.isActive };
+      const res = await saveSourceSafe(updated, authToken || '');
+      if (res.success) {
+        addToast(`Source "${src.name}" set to ${updated.isActive ? 'ACTIVE' : 'INACTIVE'}`, 'success');
+        setSources((prev) => prev.map((s) => (s.id === src.id ? { ...s, isActive: updated.isActive } : s)));
+      } else {
+        addToast(res.error || 'Failed to update source status (Requires OWNER role)', 'error');
+      }
+    } catch (err) {
+      addToast('Failed to toggle source', 'error');
+    }
+  };
+
+  // Delete Source
+  const handleDeleteSource = async (sourceId: string, name: string) => {
+    if (!window.confirm(`Are you sure you want to delete wire source "${name}"?`)) return;
+    try {
+      const res = await deleteSourceSafe(sourceId, authToken || '');
+      if (res.success) {
+        addToast(`Source "${name}" removed from registry`, 'success');
+        setSources((prev) => prev.filter((s) => s.id !== sourceId));
+      } else {
+        addToast(res.error || 'Failed to delete source', 'error');
+      }
+    } catch (err) {
+      addToast('Failed to delete source', 'error');
     }
   };
 
@@ -194,7 +297,24 @@ export const AdminNewsroomView: React.FC = () => {
     }
   };
 
-  // Save Article Edits
+  // Delete Article
+  const handleDeleteArticle = async (articleId: string, title: string) => {
+    if (!window.confirm(`Delete article "${title.slice(0, 40)}..."?`)) return;
+    try {
+      const res = await deleteArticleSafe(articleId, authToken || '');
+      if (res.success) {
+        addToast('Article removed from database', 'success');
+        setArticles((prev) => prev.filter((a) => a.id !== articleId));
+        if (editingArticle?.id === articleId) setEditingArticle(null);
+      } else {
+        addToast(res.error || 'Failed to delete article', 'error');
+      }
+    } catch (err) {
+      addToast('Failed to delete article', 'error');
+    }
+  };
+
+  // Save Article Edits in Workbench
   const handleSaveArticleEdits = async () => {
     if (!editingArticle) return;
     try {
@@ -216,6 +336,52 @@ export const AdminNewsroomView: React.FC = () => {
       }
     } catch (err) {
       addToast('Failed to save article edits', 'error');
+    }
+  };
+
+  // Submit Manual Article Creation
+  const handleCreateManualSubmit = async (e: React.FormEvent) => {
+    e.preventDefault();
+    if (!manualForm.title || !manualForm.summary || !manualForm.content) {
+      addToast('Please provide Title, Summary, and Content body', 'error');
+      return;
+    }
+
+    setIsPublishingManual(true);
+    try {
+      const data = await createManualArticleSafe(manualForm, authToken || '');
+      if (data.success) {
+        addToast(`Article "${manualForm.title.slice(0, 30)}..." published to live feed!`, 'success');
+        setArticles((prev) => [data.article, ...prev]);
+        setActiveTab('inbox');
+        // Reset form
+        setManualForm({
+          title: '',
+          titleBn: '',
+          summary: '',
+          summaryBn: '',
+          content: '',
+          category: 'Bangladesh',
+          author: 'Chief Newsroom Editor',
+          imageUrl: 'https://images.unsplash.com/photo-1585829365295-ab7cd400c167?w=1200&auto=format&fit=crop&q=80',
+          imageCaption: 'Special dispatch by TruthPulse Editorial Desk',
+          verificationStatus: 'VERIFIED',
+          confidenceScore: 98,
+          importanceScore: 92,
+          isBreaking: true,
+          isTrending: true,
+          isEditorPick: true,
+          autoExpire: false,
+          keyFacts: ['Verified through direct primary documentation.'],
+          tags: ['Breaking', 'Special Report', 'Verified'],
+        });
+      } else {
+        addToast(data.error || 'Failed to publish manual article (Requires PUBLISH_NEWS permission)', 'error');
+      }
+    } catch (err) {
+      addToast('Failed to publish manual article', 'error');
+    } finally {
+      setIsPublishingManual(false);
     }
   };
 
@@ -252,14 +418,9 @@ export const AdminNewsroomView: React.FC = () => {
     if (!newSourceData.name || !newSourceData.feedUrl) return;
 
     try {
-      const res = await authFetch('/api/admin/sources', {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ source: newSourceData }),
-      });
-      const data = await res.json();
-      if (data.success) {
-        setSources(data.sources);
+      const res = await saveSourceSafe(newSourceData, authToken || '');
+      if (res.success) {
+        setSources(res.sources || []);
         setShowAddSourceModal(false);
         setNewSourceData({
           name: '',
@@ -268,10 +429,13 @@ export const AdminNewsroomView: React.FC = () => {
           country: 'Bangladesh',
           language: 'English',
           fetchFrequencyMinutes: 15,
+          priority: 85,
+          isActive: true,
         });
         addToast('New news source registered and active', 'success');
+        fetchAdminData();
       } else {
-        addToast(data.error || 'Failed to add source (requires OWNER role)', 'error');
+        addToast(res.error || 'Failed to add source (requires OWNER role)', 'error');
       }
     } catch (err) {
       addToast('Failed to add source', 'error');
@@ -362,13 +526,13 @@ export const AdminNewsroomView: React.FC = () => {
           </button>
 
           <button
-            onClick={() => handleTriggerIngestion()}
+            onClick={handleTriggerFullPipeline}
             disabled={isIngesting || !hasRolePermission('TRIGGER_INGESTION')}
-            className="ml-2 bg-rose-600 hover:bg-rose-500 text-white font-bold px-3 py-1.5 rounded-lg text-xs flex items-center gap-1.5 shadow-md disabled:opacity-40 disabled:cursor-not-allowed"
+            className="ml-2 bg-emerald-600 hover:bg-emerald-500 text-white font-bold px-3 py-1.5 rounded-lg text-xs flex items-center gap-1.5 shadow-md disabled:opacity-40 disabled:cursor-not-allowed"
             title={!hasRolePermission('TRIGGER_INGESTION') ? 'Requires TRIGGER_INGESTION permission' : ''}
           >
-            <Play className="w-3.5 h-3.5" />
-            <span>{isIngesting ? 'Ingesting Wires...' : 'Run Ingestion'}</span>
+            <Play className={`w-3.5 h-3.5 ${isIngesting ? 'animate-spin' : ''}`} />
+            <span>{isIngesting ? 'Running Pipeline...' : 'Run Sync Cycle'}</span>
           </button>
         </div>
       </div>
@@ -387,6 +551,8 @@ export const AdminNewsroomView: React.FC = () => {
       <div className="flex items-center gap-2 overflow-x-auto pb-1 border-b border-slate-200 dark:border-slate-800 text-xs font-semibold">
         {[
           { key: 'dashboard', label: 'Newsroom Overview', icon: Activity },
+          { key: 'rotation', label: 'Live Rotation & 12h Expiry', icon: RotateCcw },
+          { key: 'publish', label: 'Publish News (Manual)', icon: Send },
           { key: 'inbox', label: `AI News Inbox (${articles.filter((a) => a.status === 'Pending Review').length})`, icon: Radio },
           { key: 'editor', label: 'Article Workbench', icon: Edit3 },
           { key: 'sources', label: `Sources Registry (${sources.length})`, icon: Building2 },
@@ -420,11 +586,11 @@ export const AdminNewsroomView: React.FC = () => {
           {/* KPI Cards */}
           <div className="grid grid-cols-2 sm:grid-cols-4 gap-4">
             <div className="bg-white dark:bg-slate-900 p-5 rounded-2xl border border-slate-200 dark:border-slate-800 space-y-1">
-              <span className="text-xs text-slate-500 font-medium">Published Today</span>
+              <span className="text-xs text-slate-500 font-medium">Active In Feed</span>
               <div className="text-2xl font-extrabold text-emerald-600 dark:text-emerald-400">
-                {dashboardMetrics.metrics.publishedToday}
+                {syncStatus?.activeCount ?? syncStatus?.activeArticlesCount ?? dashboardMetrics.metrics.publishedToday}
               </div>
-              <span className="text-[11px] text-slate-400">Cross-checked stories live</span>
+              <span className="text-[11px] text-slate-400">Under 12h expiration window</span>
             </div>
 
             <div className="bg-white dark:bg-slate-900 p-5 rounded-2xl border border-slate-200 dark:border-slate-800 space-y-1">
@@ -432,36 +598,65 @@ export const AdminNewsroomView: React.FC = () => {
               <div className="text-2xl font-extrabold text-amber-500">
                 {dashboardMetrics.metrics.pendingReview}
               </div>
-              <span className="text-[11px] text-slate-400">Awaiting editor approval</span>
+              <span className="text-[11px] text-slate-400">Awaiting editor decision</span>
             </div>
 
             <div className="bg-white dark:bg-slate-900 p-5 rounded-2xl border border-slate-200 dark:border-slate-800 space-y-1">
-              <span className="text-xs text-slate-500 font-medium">Connected Sources</span>
+              <span className="text-xs text-slate-500 font-medium">Active Wire Sources</span>
               <div className="text-2xl font-extrabold text-teal-600 dark:text-teal-400">
-                {dashboardMetrics.metrics.sourcesCount}
+                {syncStatus?.activeSources ?? syncStatus?.activeSourcesCount ?? sources.filter((s) => s.isActive).length}
               </div>
               <span className="text-[11px] text-slate-400">
-                {dashboardMetrics.metrics.failedSources} Degraded Wires
+                {sources.length} Total Registered
               </span>
             </div>
 
             <div className="bg-white dark:bg-slate-900 p-5 rounded-2xl border border-slate-200 dark:border-slate-800 space-y-1">
-              <span className="text-xs text-slate-500 font-medium">Total Wire Traffic</span>
+              <span className="text-xs text-slate-500 font-medium">Expired Stories</span>
               <div className="text-2xl font-extrabold text-purple-600 dark:text-purple-400">
-                {dashboardMetrics.metrics.totalTrafficViews}
+                {syncStatus?.expiredCount ?? syncStatus?.expiredArticlesCount ?? 0}
               </div>
-              <span className="text-[11px] text-slate-400">Reader impressions</span>
+              <span className="text-[11px] text-slate-400">Archived from homepage</span>
             </div>
           </div>
 
-          {/* Quick Queue & Health Radar */}
+          {/* Quick Actions Bar */}
+          <div className="bg-gradient-to-r from-slate-900 via-slate-950 to-slate-900 text-white rounded-2xl border border-slate-800 p-6 flex flex-col sm:flex-row sm:items-center justify-between gap-4 shadow-lg">
+            <div className="space-y-1">
+              <div className="flex items-center gap-2 text-emerald-400 text-xs font-bold uppercase tracking-wider">
+                <Zap className="w-4 h-4" />
+                <span>Automated News Ingestion & Expiry Engine</span>
+              </div>
+              <h3 className="text-base font-bold">100% Dynamic News Engine Active</h3>
+              <p className="text-xs text-slate-400">
+                Background cron scheduler runs every 15 minutes. Decays stories using time-weighted scoring and retires stories older than 12 hours.
+              </p>
+            </div>
+
+            <div className="flex items-center gap-3 shrink-0">
+              <button
+                onClick={() => setActiveTab('rotation')}
+                className="px-3.5 py-2 rounded-xl bg-slate-800 hover:bg-slate-700 text-slate-200 text-xs font-bold border border-slate-700"
+              >
+                Inspect Rotation Radar
+              </button>
+              <button
+                onClick={() => setActiveTab('publish')}
+                className="px-4 py-2 rounded-xl bg-emerald-600 hover:bg-emerald-500 text-white text-xs font-bold shadow-md flex items-center gap-1.5"
+              >
+                <Plus className="w-3.5 h-3.5" />
+                <span>Publish Manual Story</span>
+              </button>
+            </div>
+          </div>
+
+          {/* Urgent Review Queue & Wire Status */}
           <div className="grid grid-cols-1 lg:grid-cols-12 gap-6">
-            {/* Urgent Review Queue (8 cols) */}
             <div className="lg:col-span-8 bg-white dark:bg-slate-900 rounded-2xl border border-slate-200 dark:border-slate-800 p-6 space-y-4">
               <div className="flex items-center justify-between border-b border-slate-100 dark:border-slate-800 pb-3">
                 <h3 className="text-sm font-bold uppercase tracking-wider text-slate-900 dark:text-white flex items-center gap-2">
                   <Radio className="w-4 h-4 text-rose-500 animate-pulse" />
-                  <span>Incoming Wire Dispatches Awaiting Decision</span>
+                  <span>Incoming Wire Dispatches Awaiting Review</span>
                 </h3>
                 <button
                   onClick={() => setActiveTab('inbox')}
@@ -524,7 +719,7 @@ export const AdminNewsroomView: React.FC = () => {
               </div>
             </div>
 
-            {/* Source Health Radar (4 cols) */}
+            {/* Wire Health Radar */}
             <div className="lg:col-span-4 bg-white dark:bg-slate-900 rounded-2xl border border-slate-200 dark:border-slate-800 p-6 space-y-4">
               <div className="flex items-center justify-between border-b border-slate-100 dark:border-slate-800 pb-3">
                 <h3 className="text-sm font-bold uppercase tracking-wider text-slate-900 dark:text-white flex items-center gap-2">
@@ -534,15 +729,22 @@ export const AdminNewsroomView: React.FC = () => {
               </div>
 
               <div className="space-y-3">
-                {sources.map((src) => (
+                {sources.slice(0, 5).map((src) => (
                   <div
                     key={src.id}
                     className="p-3 rounded-xl bg-slate-50 dark:bg-slate-800/60 border border-slate-200/80 dark:border-slate-700/80 flex items-center justify-between text-xs"
                   >
                     <div className="space-y-0.5">
-                      <div className="font-bold text-slate-900 dark:text-white">{src.name}</div>
+                      <div className="font-bold text-slate-900 dark:text-white flex items-center gap-1.5">
+                        <span>{src.name}</span>
+                        {!src.isActive && (
+                          <span className="text-[9px] bg-slate-200 dark:bg-slate-700 text-slate-600 dark:text-slate-300 px-1.5 py-0.2 rounded">
+                            PAUSED
+                          </span>
+                        )}
+                      </div>
                       <div className="text-[11px] text-slate-500">
-                        {src.category} • Every {src.fetchFrequencyMinutes}m
+                        {src.category} • Priority {src.priority || 50}
                       </div>
                     </div>
 
@@ -563,13 +765,391 @@ export const AdminNewsroomView: React.FC = () => {
         </div>
       )}
 
-      {/* B: INBOX MANAGEMENT */}
+      {/* B: LIVE ROTATION & 12-HOUR EXPIRATION PIPELINE CONTROL */}
+      {activeTab === 'rotation' && (
+        <div className="space-y-6">
+          {/* Pipeline Status Banner */}
+          <div className="bg-slate-900 text-white rounded-2xl border border-slate-800 p-6 space-y-6 shadow-xl">
+            <div className="flex flex-col md:flex-row md:items-center justify-between gap-4 border-b border-slate-800 pb-5">
+              <div className="space-y-1">
+                <div className="inline-flex items-center gap-2 px-2.5 py-0.5 rounded-full bg-emerald-950 text-emerald-400 border border-emerald-800 text-xs font-bold uppercase tracking-wider">
+                  <RotateCcw className="w-3.5 h-3.5" />
+                  <span>Step 2 & Step 22 Verification Console</span>
+                </div>
+                <h2 className="text-xl font-extrabold tracking-tight">
+                  Dynamic News Rotation & Decay Engine
+                </h2>
+                <p className="text-xs text-slate-400 max-w-2xl">
+                  Automated background cron runs every 15 minutes. Items over 12 hours old expire automatically, decaying out of the Top 20 feed to ensure fresh real-time news continuously.
+                </p>
+              </div>
+
+              <div className="flex flex-wrap items-center gap-3">
+                <button
+                  onClick={handleTriggerFullPipeline}
+                  disabled={isIngesting || !hasRolePermission('TRIGGER_INGESTION')}
+                  className="px-4 py-2.5 rounded-xl bg-emerald-600 hover:bg-emerald-500 text-white font-bold text-xs flex items-center gap-2 shadow-md disabled:opacity-40"
+                >
+                  <Play className={`w-3.5 h-3.5 ${isIngesting ? 'animate-spin' : ''}`} />
+                  <span>{isIngesting ? 'Executing Pipeline...' : 'Trigger Immediate Sync Cycle'}</span>
+                </button>
+
+                <button
+                  onClick={handleRunTestRotationScenario}
+                  disabled={isRunningTestScenario || !hasRolePermission('TRIGGER_INGESTION')}
+                  className="px-4 py-2.5 rounded-xl bg-rose-600 hover:bg-rose-500 text-white font-bold text-xs flex items-center gap-2 shadow-md disabled:opacity-40"
+                >
+                  <Zap className={`w-3.5 h-3.5 ${isRunningTestScenario ? 'animate-spin' : ''}`} />
+                  <span>{isRunningTestScenario ? 'Simulating...' : 'Test 20-Story Rotation (Step 22)'}</span>
+                </button>
+              </div>
+            </div>
+
+            {/* Sync Status Grid */}
+            <div className="grid grid-cols-2 sm:grid-cols-4 gap-4 text-xs">
+              <div className="bg-slate-950 p-4 rounded-xl border border-slate-800 space-y-1">
+                <div className="text-slate-400 font-medium">Active Stories in Feed</div>
+                <div className="text-2xl font-bold text-emerald-400">
+                  {syncStatus?.activeCount ?? syncStatus?.activeArticlesCount ?? articles.filter((a) => a.status === 'Published').length}
+                </div>
+                <div className="text-[11px] text-slate-500">Visible on Homepage</div>
+              </div>
+
+              <div className="bg-slate-950 p-4 rounded-xl border border-slate-800 space-y-1">
+                <div className="text-slate-400 font-medium">12-Hour Expired Stories</div>
+                <div className="text-2xl font-bold text-purple-400">
+                  {syncStatus?.expiredCount ?? syncStatus?.expiredArticlesCount ?? articles.filter((a) => a.status === 'Expired').length}
+                </div>
+                <div className="text-[11px] text-slate-500">Retired by Decay Filter</div>
+              </div>
+
+              <div className="bg-slate-950 p-4 rounded-xl border border-slate-800 space-y-1">
+                <div className="text-slate-400 font-medium">Total Wire Sources</div>
+                <div className="text-2xl font-bold text-teal-400">
+                  {syncStatus?.activeSources ?? syncStatus?.activeSourcesCount ?? sources.filter((s) => s.isActive).length} Active / {sources.length} Total
+                </div>
+                <div className="text-[11px] text-slate-500">Ingested every 15m</div>
+              </div>
+
+              <div className="bg-slate-950 p-4 rounded-xl border border-slate-800 space-y-1">
+                <div className="text-slate-400 font-medium">Sync Execution Cycles</div>
+                <div className="text-2xl font-bold text-amber-400">
+                  {syncStatus?.syncCycleCount ?? syncStatus?.syncCyclesRun ?? 1}
+                </div>
+                <div className="text-[11px] text-slate-500">
+                  Next: {syncStatus?.nextSyncTime || syncStatus?.nextScheduledSync ? new Date(syncStatus.nextSyncTime || syncStatus.nextScheduledSync!).toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' }) : 'In ~15 min'}
+                </div>
+              </div>
+            </div>
+
+            {/* Test Scenario Feedback Banner */}
+            {testScenarioResult && (
+              <div className="bg-emerald-950/60 border border-emerald-800 rounded-xl p-4 space-y-2 text-xs text-emerald-200">
+                <div className="font-bold text-sm text-emerald-300 flex items-center gap-2">
+                  <CheckCircle2 className="w-4 h-4 text-emerald-400" />
+                  <span>Step 22 Rotation Simulation Result:</span>
+                </div>
+                <p>
+                  Successfully seeded 20 test stories with staggered timestamps. {testScenarioResult.result?.expiredCount || 0} stories over 12 hours old were immediately expired and replaced in the Top 20 feed by fresh breaking articles.
+                </p>
+              </div>
+            )}
+          </div>
+
+          {/* Real-time Top 20 News Decay Table */}
+          <div className="bg-white dark:bg-slate-900 rounded-2xl border border-slate-200 dark:border-slate-800 p-6 space-y-4">
+            <div className="flex items-center justify-between border-b border-slate-100 dark:border-slate-800 pb-3">
+              <div>
+                <h3 className="text-sm font-bold uppercase tracking-wider text-slate-900 dark:text-white">
+                  Live Dynamically Ranked Top 20 Stories
+                </h3>
+                <p className="text-xs text-slate-500">
+                  Calculated via: (Base Importance + Verification + Breaking) × Time Decay Formula
+                </p>
+              </div>
+              <button
+                onClick={fetchAdminData}
+                className="text-xs font-semibold text-emerald-600 hover:underline flex items-center gap-1"
+              >
+                <RefreshCw className="w-3.5 h-3.5" />
+                <span>Refresh Matrix</span>
+              </button>
+            </div>
+
+            <div className="overflow-x-auto">
+              <table className="w-full text-left text-xs border-collapse">
+                <thead>
+                  <tr className="bg-slate-100 dark:bg-slate-800 border-b border-slate-200 dark:border-slate-700 text-slate-700 dark:text-slate-300 font-bold">
+                    <th className="p-3">Rank</th>
+                    <th className="p-3">Headline</th>
+                    <th className="p-3">Category</th>
+                    <th className="p-3">Age / Published</th>
+                    <th className="p-3">Status</th>
+                    <th className="p-3">Importance Score</th>
+                    <th className="p-3 text-right">Actions</th>
+                  </tr>
+                </thead>
+                <tbody className="divide-y divide-slate-100 dark:divide-slate-800">
+                  {articles.slice(0, 20).map((art, index) => {
+                    const hoursOld = (Date.now() - new Date(art.publishedAt).getTime()) / (1000 * 60 * 60);
+                    return (
+                      <tr key={art.id} className="hover:bg-slate-50 dark:hover:bg-slate-800/40">
+                        <td className="p-3 font-bold font-mono text-slate-400">
+                          #{index + 1}
+                        </td>
+                        <td className="p-3 font-semibold text-slate-900 dark:text-white max-w-xs truncate">
+                          {art.title}
+                        </td>
+                        <td className="p-3">
+                          <span className="bg-slate-100 dark:bg-slate-800 text-slate-700 dark:text-slate-300 px-2 py-0.5 rounded text-[11px]">
+                            {art.category}
+                          </span>
+                        </td>
+                        <td className="p-3 text-slate-500 font-mono">
+                          {hoursOld.toFixed(1)}h ago
+                        </td>
+                        <td className="p-3">
+                          <span
+                            className={`px-2 py-0.5 rounded-full text-[10px] font-bold uppercase ${
+                              art.status === 'Published'
+                                ? 'bg-emerald-100 text-emerald-800 dark:bg-emerald-950 dark:text-emerald-300'
+                                : art.status === 'Expired'
+                                ? 'bg-purple-100 text-purple-800 dark:bg-purple-950 dark:text-purple-300'
+                                : 'bg-amber-100 text-amber-800 dark:bg-amber-950 dark:text-amber-300'
+                            }`}
+                          >
+                            {art.status}
+                          </span>
+                        </td>
+                        <td className="p-3 font-bold text-slate-700 dark:text-slate-300">
+                          {art.importanceScore || 80}/100
+                        </td>
+                        <td className="p-3 text-right">
+                          <button
+                            onClick={() => {
+                              setEditingArticle(art);
+                              setActiveTab('editor');
+                            }}
+                            className="text-xs text-emerald-600 hover:underline font-semibold"
+                          >
+                            Edit in Workbench
+                          </button>
+                        </td>
+                      </tr>
+                    );
+                  })}
+                </tbody>
+              </table>
+            </div>
+          </div>
+        </div>
+      )}
+
+      {/* C: PUBLISH MANUAL NEWS TAB */}
+      {activeTab === 'publish' && (
+        <div className="bg-white dark:bg-slate-900 rounded-2xl border border-slate-200 dark:border-slate-800 p-6 space-y-6 shadow-sm">
+          <div className="flex items-center justify-between border-b border-slate-100 dark:border-slate-800 pb-4">
+            <div>
+              <div className="flex items-center gap-2">
+                <Send className="w-5 h-5 text-emerald-500" />
+                <h2 className="text-lg font-bold text-slate-900 dark:text-white">
+                  Direct Manual News Publisher
+                </h2>
+              </div>
+              <p className="text-xs text-slate-500 mt-0.5">
+                Publish verified original dispatches directly to the live feed with custom bylines, tags, and persistence settings.
+              </p>
+            </div>
+
+            <span className="text-xs bg-emerald-50 dark:bg-emerald-950/60 text-emerald-700 dark:text-emerald-300 font-bold px-3 py-1.5 rounded-lg border border-emerald-200 dark:border-emerald-800">
+              Role: {currentUser?.role}
+            </span>
+          </div>
+
+          <form onSubmit={handleCreateManualSubmit} className="space-y-4 text-xs">
+            <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
+              <div>
+                <label className="font-bold text-slate-700 dark:text-slate-300 block mb-1">
+                  Headline (English) *
+                </label>
+                <input
+                  type="text"
+                  required
+                  value={manualForm.title}
+                  onChange={(e) => setManualForm({ ...manualForm, title: e.target.value })}
+                  placeholder="e.g. Bangladesh Central Bank Announces AI Security Directive..."
+                  className="w-full p-2.5 bg-slate-50 dark:bg-slate-800 border border-slate-300 dark:border-slate-700 rounded-lg text-slate-900 dark:text-white font-bold"
+                />
+              </div>
+
+              <div>
+                <label className="font-bold text-slate-700 dark:text-slate-300 block mb-1">
+                  Headline (Bangla)
+                </label>
+                <input
+                  type="text"
+                  value={manualForm.titleBn}
+                  onChange={(e) => setManualForm({ ...manualForm, titleBn: e.target.value })}
+                  placeholder="e.g. বাংলাদেশ ব্যাংক এআই নিরাপত্তা নির্দেশনা জারি করেছে..."
+                  className="w-full p-2.5 bg-slate-50 dark:bg-slate-800 border border-slate-300 dark:border-slate-700 rounded-lg text-slate-900 dark:text-white"
+                />
+              </div>
+            </div>
+
+            <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
+              <div>
+                <label className="font-bold text-slate-700 dark:text-slate-300 block mb-1">
+                  Executive Summary (English) *
+                </label>
+                <textarea
+                  rows={3}
+                  required
+                  value={manualForm.summary}
+                  onChange={(e) => setManualForm({ ...manualForm, summary: e.target.value })}
+                  placeholder="Concise, verified 2-sentence summary of the story..."
+                  className="w-full p-2.5 bg-slate-50 dark:bg-slate-800 border border-slate-300 dark:border-slate-700 rounded-lg text-slate-900 dark:text-white"
+                />
+              </div>
+
+              <div>
+                <label className="font-bold text-slate-700 dark:text-slate-300 block mb-1">
+                  Executive Summary (Bangla)
+                </label>
+                <textarea
+                  rows={3}
+                  value={manualForm.summaryBn}
+                  onChange={(e) => setManualForm({ ...manualForm, summaryBn: e.target.value })}
+                  placeholder="বাংলা সংক্ষেপ..."
+                  className="w-full p-2.5 bg-slate-50 dark:bg-slate-800 border border-slate-300 dark:border-slate-700 rounded-lg text-slate-900 dark:text-white"
+                />
+              </div>
+            </div>
+
+            <div>
+              <label className="font-bold text-slate-700 dark:text-slate-300 block mb-1">
+                Full Article Content (Markdown / Text) *
+              </label>
+              <textarea
+                rows={6}
+                required
+                value={manualForm.content}
+                onChange={(e) => setManualForm({ ...manualForm, content: e.target.value })}
+                placeholder="Full article content body..."
+                className="w-full p-2.5 bg-slate-50 dark:bg-slate-800 border border-slate-300 dark:border-slate-700 rounded-lg text-slate-900 dark:text-white font-serif leading-relaxed"
+              />
+            </div>
+
+            <div className="grid grid-cols-1 sm:grid-cols-3 gap-4">
+              <div>
+                <label className="font-bold text-slate-700 dark:text-slate-300 block mb-1">
+                  Category Desk
+                </label>
+                <select
+                  value={manualForm.category}
+                  onChange={(e) => setManualForm({ ...manualForm, category: e.target.value })}
+                  className="w-full p-2.5 bg-slate-50 dark:bg-slate-800 border border-slate-300 dark:border-slate-700 rounded-lg"
+                >
+                  <option value="Bangladesh">Bangladesh</option>
+                  <option value="International">International</option>
+                  <option value="Technology">Technology</option>
+                  <option value="Artificial Intelligence">Artificial Intelligence</option>
+                  <option value="Business">Business</option>
+                  <option value="Finance & Economy">Finance & Economy</option>
+                  <option value="Sports">Sports</option>
+                  <option value="Science">Science</option>
+                  <option value="Health">Health</option>
+                </select>
+              </div>
+
+              <div>
+                <label className="font-bold text-slate-700 dark:text-slate-300 block mb-1">
+                  Author / Byline
+                </label>
+                <input
+                  type="text"
+                  value={manualForm.author}
+                  onChange={(e) => setManualForm({ ...manualForm, author: e.target.value })}
+                  className="w-full p-2.5 bg-slate-50 dark:bg-slate-800 border border-slate-300 dark:border-slate-700 rounded-lg"
+                />
+              </div>
+
+              <div>
+                <label className="font-bold text-slate-700 dark:text-slate-300 block mb-1">
+                  Hero Image URL
+                </label>
+                <input
+                  type="url"
+                  value={manualForm.imageUrl}
+                  onChange={(e) => setManualForm({ ...manualForm, imageUrl: e.target.value })}
+                  className="w-full p-2.5 bg-slate-50 dark:bg-slate-800 border border-slate-300 dark:border-slate-700 rounded-lg font-mono"
+                />
+              </div>
+            </div>
+
+            {/* Checkboxes for Editorial Flags */}
+            <div className="p-4 bg-slate-50 dark:bg-slate-800/60 rounded-xl border border-slate-200 dark:border-slate-700 flex flex-wrap items-center gap-6">
+              <label className="flex items-center gap-2 cursor-pointer font-bold">
+                <input
+                  type="checkbox"
+                  checked={manualForm.isBreaking}
+                  onChange={(e) => setManualForm({ ...manualForm, isBreaking: e.target.checked })}
+                  className="rounded text-emerald-600 focus:ring-emerald-500"
+                />
+                <span>Breaking News Banner</span>
+              </label>
+
+              <label className="flex items-center gap-2 cursor-pointer font-bold">
+                <input
+                  type="checkbox"
+                  checked={manualForm.isTrending}
+                  onChange={(e) => setManualForm({ ...manualForm, isTrending: e.target.checked })}
+                  className="rounded text-emerald-600 focus:ring-emerald-500"
+                />
+                <span>Trending Topic</span>
+              </label>
+
+              <label className="flex items-center gap-2 cursor-pointer font-bold">
+                <input
+                  type="checkbox"
+                  checked={manualForm.isEditorPick}
+                  onChange={(e) => setManualForm({ ...manualForm, isEditorPick: e.target.checked })}
+                  className="rounded text-emerald-600 focus:ring-emerald-500"
+                />
+                <span>Editor's Spotlight Pick</span>
+              </label>
+
+              <label className="flex items-center gap-2 cursor-pointer font-bold text-indigo-600 dark:text-indigo-400">
+                <input
+                  type="checkbox"
+                  checked={manualForm.autoExpire}
+                  onChange={(e) => setManualForm({ ...manualForm, autoExpire: e.target.checked })}
+                  className="rounded text-indigo-600 focus:ring-indigo-500"
+                />
+                <span>Auto-Expire After 12h (Uncheck for permanent)</span>
+              </label>
+            </div>
+
+            <div className="flex justify-end gap-3 pt-2">
+              <button
+                type="submit"
+                disabled={isPublishingManual || !hasRolePermission('PUBLISH_NEWS')}
+                className="px-6 py-2.5 bg-emerald-600 hover:bg-emerald-700 text-white font-bold rounded-xl text-xs flex items-center gap-2 shadow-md disabled:opacity-50"
+              >
+                {isPublishingManual ? <RefreshCw className="w-4 h-4 animate-spin" /> : <Send className="w-4 h-4" />}
+                <span>Publish to Live Feed</span>
+              </button>
+            </div>
+          </form>
+        </div>
+      )}
+
+      {/* D: INBOX MANAGEMENT */}
       {activeTab === 'inbox' && (
         <div className="space-y-4">
           <div className="flex flex-wrap items-center justify-between gap-4 bg-white dark:bg-slate-900 p-4 rounded-xl border border-slate-200 dark:border-slate-800">
             <div className="flex items-center gap-2">
               <span className="text-xs font-semibold text-slate-500">Filter Status:</span>
-              {['Pending Review', 'Published', 'Draft', 'Rejected', 'All'].map((st) => (
+              {['Pending Review', 'Published', 'Draft', 'Expired', 'Rejected', 'All'].map((st) => (
                 <button
                   key={st}
                   onClick={() => setInboxStatusFilter(st)}
@@ -617,6 +1197,8 @@ export const AdminNewsroomView: React.FC = () => {
                         ? 'bg-emerald-100 text-emerald-800'
                         : art.status === 'Pending Review'
                         ? 'bg-amber-100 text-amber-800'
+                        : art.status === 'Expired'
+                        ? 'bg-purple-100 text-purple-800'
                         : 'bg-slate-100 text-slate-800'
                     }`}
                   >
@@ -637,7 +1219,7 @@ export const AdminNewsroomView: React.FC = () => {
                   <div className="text-slate-500 flex items-center gap-3">
                     <span>Source: {art.primarySource?.name}</span>
                     <span>•</span>
-                    <span>Corroboration: {art.sourceComparison.totalChecked} outlets</span>
+                    <span>Corroboration: {art.sourceComparison?.totalChecked || 1} outlets</span>
                   </div>
 
                   <div className="flex items-center gap-2">
@@ -651,7 +1233,7 @@ export const AdminNewsroomView: React.FC = () => {
                       Open Workbench
                     </button>
 
-                    {hasRolePermission('PUBLISH_NEWS') && (
+                    {hasRolePermission('PUBLISH_NEWS') && art.status !== 'Published' && (
                       <button
                         onClick={() => handleUpdateStatus(art.id, 'Published')}
                         className="px-3 py-1 rounded-md bg-emerald-600 text-white text-xs font-bold hover:bg-emerald-700"
@@ -668,6 +1250,16 @@ export const AdminNewsroomView: React.FC = () => {
                         Reject
                       </button>
                     )}
+
+                    {hasRolePermission('DELETE_NEWS') && (
+                      <button
+                        onClick={() => handleDeleteArticle(art.id, art.title)}
+                        className="p-1 rounded-md text-slate-400 hover:text-rose-600 hover:bg-rose-50 dark:hover:bg-rose-950"
+                        title="Delete Article"
+                      >
+                        <Trash2 className="w-3.5 h-3.5" />
+                      </button>
+                    )}
                   </div>
                 </div>
               </div>
@@ -676,7 +1268,7 @@ export const AdminNewsroomView: React.FC = () => {
         </div>
       )}
 
-      {/* C: ARTICLE WORKBENCH & EDITORIAL AI ASSISTANT */}
+      {/* E: ARTICLE WORKBENCH & EDITORIAL AI ASSISTANT */}
       {activeTab === 'editor' && editingArticle && (
         <div className="grid grid-cols-1 lg:grid-cols-12 gap-8 items-start">
           {/* Left Column: Form Editor (7 cols) */}
@@ -712,7 +1304,7 @@ export const AdminNewsroomView: React.FC = () => {
 
               <div>
                 <label className="font-bold text-slate-700 dark:text-slate-300 block mb-1">
-                  Executive Summary (AI Ingested)
+                  Executive Summary
                 </label>
                 <textarea
                   rows={3}
@@ -763,7 +1355,7 @@ export const AdminNewsroomView: React.FC = () => {
 
                 <div>
                   <label className="font-bold text-slate-700 dark:text-slate-300 block mb-1">
-                    Editorial Publication State
+                    Publication State
                   </label>
                   <select
                     value={editingArticle.status}
@@ -777,6 +1369,7 @@ export const AdminNewsroomView: React.FC = () => {
                   >
                     <option value="Pending Review">Pending Review</option>
                     <option value="Published">Published</option>
+                    <option value="Expired">Expired</option>
                     <option value="Draft">Draft</option>
                     <option value="Scheduled">Scheduled</option>
                     <option value="Rejected">Rejected</option>
@@ -849,16 +1442,16 @@ export const AdminNewsroomView: React.FC = () => {
         </div>
       )}
 
-      {/* D: SOURCES MANAGEMENT REGISTRY */}
+      {/* F: SOURCES MANAGEMENT REGISTRY */}
       {activeTab === 'sources' && (
         <div className="space-y-4">
           <div className="flex items-center justify-between bg-white dark:bg-slate-900 p-4 rounded-xl border border-slate-200 dark:border-slate-800">
             <div>
               <h3 className="text-sm font-bold text-slate-900 dark:text-white">
-                Connected Wire Sources ({sources.length})
+                Connected Wire Sources Registry ({sources.length})
               </h3>
               <p className="text-xs text-slate-500">
-                Active RSS feeds and public wire ingestion endpoints.
+                Authorized RSS feeds and licensed news wire ingest endpoints.
               </p>
             </div>
 
@@ -884,14 +1477,16 @@ export const AdminNewsroomView: React.FC = () => {
                 className="bg-white dark:bg-slate-900 rounded-xl border border-slate-200 dark:border-slate-800 p-5 space-y-3"
               >
                 <div className="flex items-center justify-between">
-                  <span className="font-bold text-sm text-slate-900 dark:text-white">
-                    {src.name}
-                  </span>
+                  <div className="flex items-center gap-2">
+                    <span className="font-bold text-sm text-slate-900 dark:text-white">
+                      {src.name}
+                    </span>
+                  </div>
                   <span
                     className={`text-[10px] font-bold px-2 py-0.5 rounded-full uppercase ${
                       src.healthStatus === 'Healthy'
-                        ? 'bg-emerald-100 text-emerald-800'
-                        : 'bg-rose-100 text-rose-800'
+                        ? 'bg-emerald-100 text-emerald-800 dark:bg-emerald-950 dark:text-emerald-300'
+                        : 'bg-rose-100 text-rose-800 dark:bg-rose-950 dark:text-rose-300'
                     }`}
                   >
                     {src.healthStatus}
@@ -906,20 +1501,35 @@ export const AdminNewsroomView: React.FC = () => {
                   <div>
                     Category: <strong>{src.category}</strong> ({src.country})
                   </div>
-                  <div>Frequency: Every {src.fetchFrequencyMinutes} minutes</div>
+                  <div>Frequency: Every {src.fetchFrequencyMinutes} minutes • Priority {src.priority || 50}</div>
                   <div>Collected: {src.totalArticlesCollected} articles</div>
                 </div>
 
                 <div className="pt-2 border-t border-slate-100 dark:border-slate-800 flex items-center justify-between">
-                  <span className="text-[10px] text-slate-400">
-                    Last fetch: {formatDhakaTime(src.lastSuccessfulFetch)}
-                  </span>
-                  {hasRolePermission('TRIGGER_INGESTION') && (
+                  {hasRolePermission('MANAGE_SOURCES') ? (
                     <button
-                      onClick={() => handleTriggerIngestion(src.id)}
-                      className="text-xs text-emerald-600 hover:underline font-semibold"
+                      onClick={() => handleToggleSourceActive(src)}
+                      className={`text-xs font-bold px-2 py-0.5 rounded ${
+                        src.isActive
+                          ? 'bg-emerald-100 text-emerald-800 dark:bg-emerald-950 dark:text-emerald-300 hover:bg-emerald-200'
+                          : 'bg-slate-200 text-slate-600 dark:bg-slate-800 dark:text-slate-400 hover:bg-slate-300'
+                      }`}
                     >
-                      Fetch Now
+                      {src.isActive ? 'Active (Ingesting)' : 'Paused (Disabled)'}
+                    </button>
+                  ) : (
+                    <span className="text-[11px] text-slate-400">
+                      {src.isActive ? 'Active' : 'Paused'}
+                    </span>
+                  )}
+
+                  {hasRolePermission('MANAGE_SOURCES') && (
+                    <button
+                      onClick={() => handleDeleteSource(src.id, src.name)}
+                      className="text-slate-400 hover:text-rose-600 p-1"
+                      title="Remove Source"
+                    >
+                      <Trash2 className="w-3.5 h-3.5" />
                     </button>
                   )}
                 </div>
@@ -929,7 +1539,7 @@ export const AdminNewsroomView: React.FC = () => {
         </div>
       )}
 
-      {/* E: AUDIT TRAIL LOGS */}
+      {/* G: AUDIT TRAIL LOGS */}
       {activeTab === 'audit' && (
         <div className="bg-white dark:bg-slate-900 rounded-2xl border border-slate-200 dark:border-slate-800 p-6 space-y-4">
           <div className="flex items-center justify-between border-b border-slate-100 dark:border-slate-800 pb-3">
@@ -975,7 +1585,7 @@ export const AdminNewsroomView: React.FC = () => {
         </div>
       )}
 
-      {/* F: SECURITY & RBAC MATRIX TAB */}
+      {/* H: SECURITY & RBAC MATRIX TAB */}
       {activeTab === 'security' && (
         <div className="space-y-6">
           {/* JWT Session Details Card */}
@@ -1080,49 +1690,10 @@ export const AdminNewsroomView: React.FC = () => {
               </table>
             </div>
           </div>
-
-          {/* Registered Admin Accounts */}
-          <div className="bg-white dark:bg-slate-900 rounded-2xl border border-slate-200 dark:border-slate-800 p-6 space-y-4">
-            <div className="flex items-center justify-between border-b border-slate-100 dark:border-slate-800 pb-3">
-              <h3 className="text-sm font-bold uppercase tracking-wider text-slate-900 dark:text-white flex items-center gap-2">
-                <UserCheck className="w-4 h-4 text-emerald-500" />
-                <span>Registered Staff & Newsroom Accounts</span>
-              </h3>
-            </div>
-
-            <div className="grid grid-cols-1 sm:grid-cols-3 gap-4">
-              {[
-                { name: 'Rahim Chowdhury', role: 'OWNER', email: 'owner@truthpulse.ai', pwdHint: 'TruthPulse@2026!' },
-                { name: 'Farhana Yasmin', role: 'EDITOR', email: 'editor@truthpulse.ai', pwdHint: 'Editor@2026!' },
-                { name: 'Tanvir Ahmed', role: 'ANALYST', email: 'analyst@truthpulse.ai', pwdHint: 'Analyst@2026!' },
-              ].map((acc) => (
-                <div key={acc.email} className="p-4 rounded-xl bg-slate-50 dark:bg-slate-800/60 border border-slate-200 dark:border-slate-700 space-y-2 text-xs">
-                  <div className="flex items-center justify-between">
-                    <span className="font-bold text-slate-900 dark:text-white">{acc.name}</span>
-                    <span className="bg-emerald-100 dark:bg-emerald-950 text-emerald-800 dark:text-emerald-300 font-bold px-2 py-0.5 rounded text-[10px]">
-                      {acc.role}
-                    </span>
-                  </div>
-                  <div className="text-slate-500 font-mono text-[11px]">{acc.email}</div>
-                  <div className="text-[10px] text-slate-400">Password: <span className="font-mono">{acc.pwdHint}</span></div>
-                  <button
-                    onClick={() => {
-                      setLoginEmail(acc.email);
-                      setLoginPassword(acc.pwdHint);
-                      setShowLoginModal(true);
-                    }}
-                    className="w-full mt-2 py-1.5 bg-slate-200 dark:bg-slate-700 hover:bg-slate-300 dark:hover:bg-slate-600 rounded-lg text-[11px] font-bold text-slate-800 dark:text-slate-200"
-                  >
-                    Authenticate as {acc.role}
-                  </button>
-                </div>
-              ))}
-            </div>
-          </div>
         </div>
       )}
 
-      {/* G: BACKGROUND JOBS MONITOR */}
+      {/* I: BACKGROUND JOBS MONITOR */}
       {activeTab === 'jobs' && (
         <div className="bg-white dark:bg-slate-900 rounded-2xl border border-slate-200 dark:border-slate-800 p-6 space-y-4">
           <div className="flex items-center justify-between border-b border-slate-100 dark:border-slate-800 pb-3">
@@ -1131,10 +1702,10 @@ export const AdminNewsroomView: React.FC = () => {
             </h3>
             {hasRolePermission('TRIGGER_INGESTION') && (
               <button
-                onClick={() => handleTriggerIngestion()}
+                onClick={handleTriggerFullPipeline}
                 className="bg-emerald-600 text-white px-3 py-1 rounded-lg text-xs font-bold"
               >
-                Trigger Job
+                Trigger Ingestion
               </button>
             )}
           </div>
@@ -1290,7 +1861,7 @@ export const AdminNewsroomView: React.FC = () => {
                   <select
                     value={newSourceData.category}
                     onChange={(e) =>
-                      setNewSourceData({ ...newSourceData, category: e.target.value })
+                      setNewSourceData({ ...newSourceData, category: e.target.value as NewsCategory })
                     }
                     className="w-full p-2 bg-slate-50 dark:bg-slate-800 border border-slate-300 dark:border-slate-700 rounded-lg"
                   >

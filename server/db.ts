@@ -1,4 +1,6 @@
 import bcrypt from 'bcryptjs';
+import fs from 'fs';
+import path from 'path';
 import {
   NewsArticle,
   NewsSourceRegistry,
@@ -13,6 +15,9 @@ import {
   NewsCategory,
   VerificationStatus,
 } from '../src/types';
+import { rankNewsArticles } from './services/newsRanker';
+import { runNewsExpiryCheck } from './services/newsExpiryService';
+import { generateTestScenarioStories } from './services/newsFetcher';
 
 export interface UserAccount extends User {
   passwordHash: string;
@@ -20,6 +25,115 @@ export interface UserAccount extends User {
 
 // In-Memory Database store with persistent defaults
 class TruthPulseDatabase {
+  private dbFilePath = path.join(process.cwd(), 'data', 'news_db.json');
+
+  constructor() {
+    this.ensureDataDir();
+    this.loadFromDisk();
+  }
+
+  private ensureDataDir() {
+    const dir = path.dirname(this.dbFilePath);
+    if (!fs.existsSync(dir)) {
+      try {
+        fs.mkdirSync(dir, { recursive: true });
+      } catch (err) {
+        console.warn('Could not create data dir:', err);
+      }
+    }
+  }
+
+  public saveToDisk(): void {
+    try {
+      this.ensureDataDir();
+      const payload = {
+        users: this.users,
+        systemSettings: this.systemSettings,
+        sources: this.sources,
+        articles: this.articles,
+        factChecks: this.factChecks,
+        trendingTopics: this.trendingTopics,
+        auditLogs: this.auditLogs,
+        backgroundJobs: this.backgroundJobs,
+        savedAt: new Date().toISOString(),
+      };
+      fs.writeFileSync(this.dbFilePath, JSON.stringify(payload, null, 2), 'utf-8');
+    } catch (err) {
+      console.warn('Notice: Failed writing news_db.json to disk:', err);
+    }
+  }
+
+  public loadFromDisk(): void {
+    try {
+      if (fs.existsSync(this.dbFilePath)) {
+        const raw = fs.readFileSync(this.dbFilePath, 'utf-8');
+        const data = JSON.parse(raw);
+        if (Array.isArray(data.sources) && data.sources.length > 0) {
+          // Cleanly migrate any deprecated/broken feed URLs to verified working ones
+          this.sources = data.sources.map((s: NewsSourceRegistry) => {
+            if (s.feedUrl?.includes('dhakatribune.com') || s.id === 'src_dhaka_tribune') {
+              return {
+                ...s,
+                id: 'src_daily_star',
+                name: 'The Daily Star Wire',
+                feedUrl: 'https://www.thedailystar.net/frontpage/rss.xml',
+                category: 'Bangladesh',
+                healthStatus: 'Healthy',
+                errorCount: 0,
+                lastErrorMessage: undefined,
+              };
+            }
+            if (s.feedUrl?.includes('reutersagency.com') || s.id === 'src_reuters_tech') {
+              return {
+                ...s,
+                id: 'src_arstechnica',
+                name: 'Ars Technica Tech & AI Wire',
+                feedUrl: 'https://feeds.arstechnica.com/arstechnica/index',
+                category: 'Technology',
+                healthStatus: 'Healthy',
+                errorCount: 0,
+                lastErrorMessage: undefined,
+              };
+            }
+            if (s.feedUrl?.includes('nature.com/subjects/science/rss') || s.id === 'src_nature_science') {
+              return {
+                ...s,
+                name: 'Nature Scientific Reports',
+                feedUrl: 'https://www.nature.com/nature.rss',
+                category: 'Science',
+                healthStatus: 'Healthy',
+                errorCount: 0,
+                lastErrorMessage: undefined,
+              };
+            }
+            return s;
+          });
+        }
+        if (Array.isArray(data.articles) && data.articles.length > 0) {
+          this.articles = data.articles;
+        }
+        if (Array.isArray(data.factChecks) && data.factChecks.length > 0) {
+          this.factChecks = data.factChecks;
+        }
+        if (Array.isArray(data.trendingTopics) && data.trendingTopics.length > 0) {
+          this.trendingTopics = data.trendingTopics;
+        }
+        if (Array.isArray(data.auditLogs) && data.auditLogs.length > 0) {
+          this.auditLogs = data.auditLogs;
+        }
+        if (Array.isArray(data.systemSettings) && data.systemSettings.length > 0) {
+          this.systemSettings = data.systemSettings;
+        }
+        if (Array.isArray(data.users) && data.users.length > 0) {
+          this.users = data.users;
+        }
+        console.log(`[Database] Loaded persistent data: ${this.articles.length} articles, ${this.sources.length} sources.`);
+      }
+    } catch (err) {
+      console.warn('[Database] Notice loading news_db.json:', err);
+    }
+  }
+
   public users: UserAccount[] = [
     {
       id: 'usr_owner_1',
@@ -106,9 +220,9 @@ class TruthPulseDatabase {
 
   public sources: NewsSourceRegistry[] = [
     {
-      id: 'src_dhaka_tribune',
-      name: 'Dhaka Tribune Wire',
-      feedUrl: 'https://www.dhakatribune.com/feed',
+      id: 'src_daily_star',
+      name: 'The Daily Star Wire',
+      feedUrl: 'https://www.thedailystar.net/frontpage/rss.xml',
       category: 'Bangladesh',
       country: 'Bangladesh',
       language: 'English',
@@ -136,11 +250,11 @@ class TruthPulseDatabase {
       totalArticlesCollected: 580,
     },
     {
-      id: 'src_reuters_tech',
-      name: 'Reuters Technology & AI Wire',
-      feedUrl: 'https://www.reutersagency.com/feed/?taxonomy=markets&post_type=best',
+      id: 'src_arstechnica',
+      name: 'Ars Technica Tech & AI Wire',
+      feedUrl: 'https://feeds.arstechnica.com/arstechnica/index',
       category: 'Technology',
-      country: 'International',
+      country: 'United States',
       language: 'English',
       isActive: true,
       fetchFrequencyMinutes: 20,
@@ -183,7 +297,7 @@ class TruthPulseDatabase {
     {
       id: 'src_nature_science',
       name: 'Nature Scientific Reports',
-      feedUrl: 'https://www.nature.com/subjects/science/rss',
+      feedUrl: 'https://www.nature.com/nature.rss',
       category: 'Science',
       country: 'International',
       language: 'English',
@@ -1571,13 +1685,22 @@ The World Health Organization (WHO) has initiated accelerated emergency pre-qual
   ];
 
   // Helper Methods
-  public getArticles(filter?: { category?: string; status?: string; search?: string; verificationStatus?: string }) {
+  public getArticles(filter?: {
+    category?: string;
+    status?: string;
+    search?: string;
+    verificationStatus?: string;
+    sort?: string;
+    includeExpired?: boolean;
+  }) {
     let list = [...this.articles];
-    if (filter?.status) {
+
+    // Status filter
+    if (filter?.status && filter.status !== 'All') {
       list = list.filter((a) => a.status.toLowerCase() === filter.status?.toLowerCase());
-    } else {
-      // By default for public API, return Published
-      list = list.filter((a) => a.status === 'Published');
+    } else if (!filter?.includeExpired) {
+      // By default for public API, show active Published / Approved
+      list = list.filter((a) => a.status === 'Published' || a.status === 'Approved');
     }
 
     if (filter?.category && filter.category !== 'All') {
@@ -1585,7 +1708,9 @@ The World Health Organization (WHO) has initiated accelerated emergency pre-qual
     }
 
     if (filter?.verificationStatus && filter.verificationStatus !== 'All') {
-      list = list.filter((a) => a.verificationStatus.toLowerCase() === filter.verificationStatus?.toLowerCase());
+      list = list.filter(
+        (a) => a.verificationStatus.toLowerCase() === filter.verificationStatus?.toLowerCase()
+      );
     }
 
     if (filter?.search) {
@@ -1593,13 +1718,45 @@ The World Health Organization (WHO) has initiated accelerated emergency pre-qual
       list = list.filter(
         (a) =>
           a.title.toLowerCase().includes(q) ||
+          (a.titleBn && a.titleBn.toLowerCase().includes(q)) ||
           a.summary.toLowerCase().includes(q) ||
+          (a.summaryBn && a.summaryBn.toLowerCase().includes(q)) ||
           a.tags.some((t) => t.toLowerCase().includes(q)) ||
-          a.primarySource.name.toLowerCase().includes(q)
+          a.primarySource?.name?.toLowerCase().includes(q)
       );
     }
 
-    return list.sort((a, b) => new Date(b.publishedAt).getTime() - new Date(a.publishedAt).getTime());
+    // Sorting
+    if (filter?.sort === 'Important') {
+      return list.sort((a, b) => (b.importanceScore || 0) - (a.importanceScore || 0));
+    } else if (filter?.sort === 'Trending') {
+      return list.sort((a, b) => (b.isTrending ? 1 : 0) - (a.isTrending ? 1 : 0));
+    } else if (filter?.sort === 'Most Read') {
+      return list.sort((a, b) => (b.viewsCount || 0) - (a.viewsCount || 0));
+    } else if (filter?.sort === 'Dynamic Ranked' || filter?.sort === 'Ranked') {
+      return rankNewsArticles(list, {
+        category: filter.category,
+        excludeExpired: !filter.includeExpired,
+        enforceCategoryDiversity: false,
+        limit: 100,
+      });
+    }
+
+    return list.sort(
+      (a, b) =>
+        new Date(b.publishedAt || b.createdAt || 0).getTime() -
+        new Date(a.publishedAt || a.createdAt || 0).getTime()
+    );
+  }
+
+  public getTopNews(limit: number = 20, category?: string): NewsArticle[] {
+    return rankNewsArticles(this.articles, {
+      limit,
+      category,
+      excludeExpired: true,
+      enforceCategoryDiversity: true,
+      maxPerCategory: 5,
+    });
   }
 
   public getArticleBySlug(slug: string) {
@@ -1607,8 +1764,30 @@ The World Health Organization (WHO) has initiated accelerated emergency pre-qual
   }
 
   public addArticle(article: NewsArticle) {
-    this.articles.unshift(article);
-    return article;
+    const nowStr = new Date().toISOString();
+    const publishedAt = article.publishedAt || nowStr;
+    const createdAt = article.createdAt || nowStr;
+    const updatedAt = article.updatedAt || nowStr;
+    
+    // Auto-calculate 12-hour expiration if not manual or if manual with autoExpire
+    let expiresAt = article.expiresAt;
+    if (!expiresAt) {
+      const pubMs = new Date(publishedAt).getTime();
+      expiresAt = new Date(pubMs + 12 * 60 * 60 * 1000).toISOString();
+    }
+
+    const finalizedArticle: NewsArticle = {
+      ...article,
+      publishedAt,
+      createdAt,
+      updatedAt,
+      expiresAt,
+      retrievedAt: article.retrievedAt || nowStr,
+    };
+
+    this.articles.unshift(finalizedArticle);
+    this.saveToDisk();
+    return finalizedArticle;
   }
 
   public updateArticle(id: string, updates: Partial<NewsArticle>, actor: User) {
@@ -1617,6 +1796,7 @@ The World Health Organization (WHO) has initiated accelerated emergency pre-qual
     const prev = this.articles[idx];
     const updated = { ...prev, ...updates, updatedAt: new Date().toISOString() };
     this.articles[idx] = updated;
+    this.saveToDisk();
 
     // Record audit log
     this.auditLogs.unshift({
@@ -1633,6 +1813,121 @@ The World Health Organization (WHO) has initiated accelerated emergency pre-qual
     });
 
     return updated;
+  }
+
+  public deleteArticle(id: string, actor: User): boolean {
+    const idx = this.articles.findIndex((a) => a.id === id);
+    if (idx === -1) return false;
+    const deleted = this.articles.splice(idx, 1)[0];
+    this.saveToDisk();
+
+    this.addAuditLog({
+      actorId: actor.id,
+      actorName: actor.name,
+      actorRole: actor.role,
+      action: 'ARTICLE_DELETED',
+      entityType: 'Article',
+      entityId: id,
+      previousValue: `Title: ${deleted.title} (${deleted.category})`,
+    });
+
+    return true;
+  }
+
+  // Source Management Methods
+  public getSourceById(id: string): NewsSourceRegistry | null {
+    return this.sources.find((s) => s.id === id) || null;
+  }
+
+  public addSource(sourceData: Omit<NewsSourceRegistry, 'id' | 'errorCount' | 'healthStatus' | 'totalArticlesCollected'>, actor: User): NewsSourceRegistry {
+    const newSource: NewsSourceRegistry = {
+      ...sourceData,
+      id: `src_${Date.now()}_${Math.random().toString(36).substring(2, 6)}`,
+      errorCount: 0,
+      healthStatus: 'Healthy',
+      totalArticlesCollected: 0,
+      isActive: sourceData.isActive !== false,
+      fetchFrequencyMinutes: sourceData.fetchFrequencyMinutes || 15,
+      priority: sourceData.priority || 5,
+    };
+
+    this.sources.push(newSource);
+    this.saveToDisk();
+
+    this.addAuditLog({
+      actorId: actor.id,
+      actorName: actor.name,
+      actorRole: actor.role,
+      action: 'SOURCE_ADDED',
+      entityType: 'Source',
+      entityId: newSource.id,
+      newValue: `Added news source: ${newSource.name} (${newSource.category})`,
+    });
+
+    return newSource;
+  }
+
+  public updateSource(id: string, updates: Partial<NewsSourceRegistry>, actor: User): NewsSourceRegistry | null {
+    const idx = this.sources.findIndex((s) => s.id === id);
+    if (idx === -1) return null;
+    const prev = this.sources[idx];
+    const updated = { ...prev, ...updates };
+    this.sources[idx] = updated;
+    this.saveToDisk();
+
+    this.addAuditLog({
+      actorId: actor.id,
+      actorName: actor.name,
+      actorRole: actor.role,
+      action: 'SOURCE_UPDATED',
+      entityType: 'Source',
+      entityId: id,
+      previousValue: `Name: ${prev.name} | Active: ${prev.isActive}`,
+      newValue: `Name: ${updated.name} | Active: ${updated.isActive}`,
+    });
+
+    return updated;
+  }
+
+  public deleteSource(id: string, actor: User): boolean {
+    const idx = this.sources.findIndex((s) => s.id === id);
+    if (idx === -1) return false;
+    const deleted = this.sources.splice(idx, 1)[0];
+    this.saveToDisk();
+
+    this.addAuditLog({
+      actorId: actor.id,
+      actorName: actor.name,
+      actorRole: actor.role,
+      action: 'SOURCE_DELETED',
+      entityType: 'Source',
+      entityId: id,
+      previousValue: `Deleted source: ${deleted.name}`,
+    });
+
+    return true;
+  }
+
+  public seedScenarioTestData(actor?: User): { count: number; articles: NewsArticle[] } {
+    const generated = generateTestScenarioStories(20);
+    for (const item of generated) {
+      this.articles.unshift(item);
+    }
+    this.saveToDisk();
+
+    if (actor) {
+      this.addAuditLog({
+        actorId: actor.id,
+        actorName: actor.name,
+        actorRole: actor.role,
+        action: 'TEST_SCENARIO_SEEDED',
+        entityType: 'Article',
+        entityId: 'SCENARIO_20_STORIES',
+        newValue: `Seeded 20 dynamic rotation test stories with staggered expirations`,
+      });
+    }
+
+    return { count: generated.length, articles: generated };
   }
 
   public addAuditLog(log: Omit<AuditLog, 'id' | 'timestamp'>) {

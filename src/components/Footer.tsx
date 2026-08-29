@@ -134,6 +134,14 @@ export const Footer: React.FC = () => {
               </li>
               <li>
                 <button
+                  onClick={() => navigateTo('saved')}
+                  className="hover:text-emerald-400 transition-colors"
+                >
+                  {t.navSaved || 'Saved Reading List'}
+                </button>
+              </li>
+              <li>
+                <button
                   onClick={() => navigateTo('admin')}
                   className="hover:text-emerald-400 text-emerald-400 flex items-center gap-1 transition-colors"
                 >

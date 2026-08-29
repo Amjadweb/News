@@ -43,6 +43,8 @@ export type ArticleStatus =
   | 'Approved' 
   | 'Scheduled' 
   | 'Published' 
+  | 'Draft'
+  | 'Expired'
   | 'Rejected' 
   | 'Archived';
 
@@ -79,7 +81,7 @@ export interface NewsSourceItem {
   author?: string;
   publishedAt: string;
   retrievedAt: string;
-  sourceType: 'Official API' | 'RSS Feed' | 'Public Dataset' | 'Government Source' | 'Verified Outlet';
+  sourceType: 'Official API' | 'RSS Feed' | 'Public Dataset' | 'Government Source' | 'Verified Outlet' | 'Manual Editorial';
   reliabilityScore: number; // 0-100
   isPrimary?: boolean;
   biasRating?: 'Center' | 'Balanced' | 'Official Agency' | 'Tech Wire';
@@ -117,18 +119,30 @@ export interface NewsArticle {
   imageUrl: string;
   imageCaption?: string;
   publishedAt: string; // ISO UTC
+  createdAt?: string; // ISO UTC
   updatedAt: string; // ISO UTC
+  expiresAt?: string; // ISO UTC (12-hour expiration for auto-collected items)
   retrievedAt: string;
   scheduledFor?: string;
   status: ArticleStatus;
   verificationStatus: VerificationStatus;
   confidenceScore: number; // 0 - 100
   importanceScore: number; // 0 - 100
+  dynamicRankScore?: number; // Calculated dynamic ranking score
+  trendingScore?: number;
   viewsCount: number;
   isBreaking?: boolean;
   isTrending?: boolean;
   isEditorPick?: boolean;
+  isFeatured?: boolean;
+  isManual?: boolean;
+  autoExpire?: boolean; // If true for manual articles, auto-expires after 12h
   isDemoData?: boolean;
+  aiGenerated?: boolean;
+  createdBy?: string;
+  sourceName?: string;
+  sourceUrl?: string;
+  externalId?: string;
   
   // BBC & Google News Style Rich Metadata
   byline?: string;
@@ -208,12 +222,35 @@ export interface NewsSourceRegistry {
   country: string;
   language: string;
   isActive: boolean;
+  priority?: number; // 1 (High) to 10 (Low), default 5
+  description?: string;
   fetchFrequencyMinutes: number;
   lastSuccessfulFetch?: string;
   lastFetchAttempt?: string;
+  lastErrorMessage?: string;
   errorCount: number;
   healthStatus: 'Healthy' | 'Degraded' | 'Failing' | 'Inactive';
   totalArticlesCollected: number;
+}
+
+export interface NewsSyncStatus {
+  lastSyncTime: string;
+  nextSyncTime: string;
+  activeCount: number;
+  expiredCount: number;
+  manualCount: number;
+  totalSources: number;
+  activeSources: number;
+  isSyncing: boolean;
+  syncCycleCount: number;
+  lastSyncNewArticlesCount: number;
+  message?: string;
+  activeArticlesCount?: number;
+  expiredArticlesCount?: number;
+  activeSourcesCount?: number;
+  syncCyclesRun?: number;
+  nextScheduledSync?: string;
+  lastSyncCompletedAt?: string;
 }
 
 export type FactCheckVerdict = 'TRUE' | 'MOSTLY TRUE' | 'MIXED' | 'MOSTLY FALSE' | 'FALSE' | 'UNVERIFIED' | 'DISPUTED';
@@ -221,6 +258,7 @@ export type FactCheckVerdict = 'TRUE' | 'MOSTLY TRUE' | 'MIXED' | 'MOSTLY FALSE'
 export interface FactCheckItem {
   id: string;
   claim: string;
+  claimBn?: string;
   claimant?: string;
   claimDate?: string;
   verdict: FactCheckVerdict;
@@ -362,3 +400,15 @@ export interface BackgroundJob {
   completedAt?: string;
   errorMessage?: string;
 }
+
+export interface ReadLaterReminder {
+  id: string;
+  articleId?: string;
+  articleTitle?: string;
+  articleSlug?: string;
+  reminderTime: number; // timestamp in ms
+  durationMinutes: number;
+  createdAt: string;
+  triggered?: boolean;
+}
+

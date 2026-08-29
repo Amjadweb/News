@@ -1,6 +1,7 @@
 import Parser from 'rss-parser';
 import { db } from './db';
 import { analyzeArticleWithAI } from './gemini';
+import { extractSafeString } from './services/newsFetcher';
 import { NewsArticle, NewsSourceRegistry, NewsCategory } from '../src/types';
 
 const parser = new Parser({
@@ -96,12 +97,13 @@ export async function runIngestionPipeline(sourceId?: string): Promise<{
 
       const items = (feed.items || []).slice(0, 3); // process up to 3 latest items per feed
       for (const item of items) {
-        if (!item.title) continue;
+        const itemTitle = extractSafeString(item.title);
+        if (!itemTitle || itemTitle.length < 5) continue;
         fetchedCount++;
 
         // Deduplication Check against existing articles
         const existingDuplicate = db.articles.find((art) => {
-          const sim = calculateTitleSimilarity(art.title, item.title!);
+          const sim = calculateTitleSimilarity(art.title, itemTitle);
           return sim > 0.65;
         });
 
@@ -112,7 +114,7 @@ export async function runIngestionPipeline(sourceId?: string): Promise<{
             existingDuplicate.sourceComparison.sources.push({
               id: `src_${Date.now()}`,
               name: src.name,
-              url: item.link || src.feedUrl,
+              url: extractSafeString(item.link) || src.feedUrl,
               publisher: src.name,
               domain: new URL(src.feedUrl).hostname,
               publishedAt: item.pubDate || new Date().toISOString(),
@@ -127,13 +129,14 @@ export async function runIngestionPipeline(sourceId?: string): Promise<{
         }
 
         // Run AI Analysis & Claim Extraction
+        const rawContent = extractSafeString(item.contentSnippet || item.content) || itemTitle;
         const aiResult = await analyzeArticleWithAI({
-          title: item.title,
-          content: item.contentSnippet || item.content || item.title,
+          title: itemTitle,
+          content: rawContent,
           sourceName: src.name,
         });
 
-        const slug = item.title
+        const slug = itemTitle
           .toLowerCase()
           .replace(/[^\w\s-]/g, '')
           .replace(/\s+/g, '-')
@@ -142,7 +145,7 @@ export async function runIngestionPipeline(sourceId?: string): Promise<{
         const newArticle: NewsArticle = {
           id: `art_${Date.now()}_${Math.random().toString(36).substring(2, 6)}`,
           slug,
-          title: item.title,
+          title: itemTitle,
           summary: aiResult.aiSummary,
           contentSnippet: item.contentSnippet || item.content,
           category: (aiResult.category as NewsCategory) || src.category,

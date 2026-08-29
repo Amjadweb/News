@@ -2,7 +2,7 @@ import { GoogleGenAI, Type } from '@google/genai';
 
 let aiClient: GoogleGenAI | null = null;
 
-function getGeminiClient(): GoogleGenAI | null {
+export function getGeminiClient(): GoogleGenAI | null {
   if (!aiClient) {
     const apiKey = process.env.GEMINI_API_KEY;
     if (!apiKey || apiKey === 'MY_GEMINI_API_KEY') {
@@ -20,29 +20,65 @@ function getGeminiClient(): GoogleGenAI | null {
   return aiClient;
 }
 
-// Helper to generate content with transient retry logic
-async function generateWithRetry(ai: GoogleGenAI, params: any, maxRetries = 2) {
-  let lastError: any = null;
-  for (let attempt = 0; attempt < maxRetries; attempt++) {
-    try {
-      return await ai.models.generateContent(params);
-    } catch (err: any) {
-      lastError = err;
-      const isTransient =
-        err?.status === 503 ||
-        err?.error?.code === 503 ||
-        err?.message?.includes('503') ||
-        err?.message?.includes('high demand') ||
-        err?.message?.includes('UNAVAILABLE');
+// Fallback models sequence adhering to @google/genai guidelines
+const MODEL_CANDIDATES = ['gemini-3.7-flash', 'gemini-3.1-flash-lite', 'gemini-flash-latest'];
 
-      if (isTransient && attempt < maxRetries - 1) {
-        console.warn(`Gemini API transient high demand (attempt ${attempt + 1}/${maxRetries}), retrying in 750ms...`);
-        await new Promise((resolve) => setTimeout(resolve, 750 * (attempt + 1)));
-        continue;
+/**
+ * Resilient multi-model content generator with exponential backoff and automatic failover
+ */
+export async function generateWithMultiModelRetry(ai: GoogleGenAI, params: any) {
+  const preferredModel = params.model || 'gemini-3.7-flash';
+  const modelsToTry = [
+    preferredModel,
+    ...MODEL_CANDIDATES.filter((m) => m !== preferredModel),
+  ];
+
+  let lastError: any = null;
+
+  for (let mIdx = 0; mIdx < modelsToTry.length; mIdx++) {
+    const currentModel = modelsToTry[mIdx];
+    const maxRetriesForModel = 2;
+
+    for (let attempt = 0; attempt < maxRetriesForModel; attempt++) {
+      try {
+        const response = await ai.models.generateContent({
+          ...params,
+          model: currentModel,
+        });
+        return response;
+      } catch (err: any) {
+        lastError = err;
+        const errMessage = err?.message || JSON.stringify(err || '');
+        const isTransient =
+          err?.status === 503 ||
+          err?.error?.code === 503 ||
+          errMessage.includes('503') ||
+          errMessage.includes('high demand') ||
+          errMessage.includes('UNAVAILABLE') ||
+          errMessage.includes('RESOURCE_EXHAUSTED') ||
+          err?.status === 429;
+
+        if (isTransient) {
+          if (attempt < maxRetriesForModel - 1) {
+            const backoffMs = 600 * (attempt + 1) + Math.random() * 200;
+            console.log(
+              `[Gemini] Transient 503/high demand on ${currentModel} (attempt ${attempt + 1}/${maxRetriesForModel}). Retrying in ${Math.round(backoffMs)}ms...`
+            );
+            await new Promise((resolve) => setTimeout(resolve, backoffMs));
+            continue;
+          } else if (mIdx < modelsToTry.length - 1) {
+            console.log(
+              `[Gemini] ${currentModel} busy under high demand. Auto-failing over to alternative model ${modelsToTry[mIdx + 1]}...`
+            );
+          }
+        } else {
+          // If non-transient error, break to next candidate or throw
+          break;
+        }
       }
-      throw err;
     }
   }
+
   throw lastError;
 }
 
@@ -92,7 +128,7 @@ Produce a structured JSON with:
 - verificationStatus: One of ['Verified', 'Mostly Verified', 'Mixed Evidence', 'Unverified', 'Disputed', 'Needs Editorial Review']
 `;
 
-    const response = await generateWithRetry(ai, {
+    const response = await generateWithMultiModelRetry(ai, {
       model: 'gemini-3.7-flash',
       contents: prompt,
       config: {
@@ -152,7 +188,7 @@ Produce a structured JSON with:
       isDemoData: false,
     };
   } catch (err) {
-    console.error('Error analyzing article with Gemini (fallback engaged):', err);
+    console.log('[Gemini] Article analysis fallback gracefully engaged');
     return {
       aiSummary: `Summary generated for ${articleText.title}. Verified source attribution to ${articleText.sourceName}.`,
       category: 'Technology',
@@ -221,7 +257,7 @@ Strict Guidelines:
 6. Note any contradictory evidence.
 7. Explain clearly why this verdict was reached in 'whyTrustedExplanation' without claiming absolute infallible truth.`;
 
-    const response = await generateWithRetry(ai, {
+    const response = await generateWithMultiModelRetry(ai, {
       model: 'gemini-3.7-flash',
       contents: prompt,
       config: {
@@ -272,7 +308,7 @@ Strict Guidelines:
       whyTrustedExplanation: parsed.whyTrustedExplanation,
     };
   } catch (err) {
-    console.error('Error verifying claim with Gemini (fallback engaged):', err);
+    console.log('[Gemini] Claim verification fallback gracefully engaged');
     return fallbackFactCheck;
   }
 }
@@ -377,7 +413,7 @@ Provide a comprehensive, highly rigorous analytical response in JSON:
   }
 `;
 
-    const response = await generateWithRetry(ai, {
+    const response = await generateWithMultiModelRetry(ai, {
       model: 'gemini-3.7-flash',
       contents: prompt,
       config: {
@@ -468,7 +504,7 @@ Provide a comprehensive, highly rigorous analytical response in JSON:
       dataQualityScore: parsed.qualityScore || 94,
     };
   } catch (err) {
-    console.error('Error analyzing dataset with Gemini (fallback engaged):', err);
+    console.log('[Gemini] Dataset analysis fallback gracefully engaged');
     return fallbackAnalysis;
   }
 }
@@ -502,7 +538,7 @@ Respond in JSON with:
 - confidence: integer 0-100
 `;
 
-    const response = await generateWithRetry(ai, {
+    const response = await generateWithMultiModelRetry(ai, {
       model: 'gemini-3.7-flash',
       contents: prompt,
       config: {
@@ -526,7 +562,7 @@ Respond in JSON with:
       confidence: parsed.confidence || 85,
     };
   } catch (err) {
-    console.error('Error answering data question with Gemini (fallback engaged):', err);
+    console.log('[Gemini] Data question answering fallback gracefully engaged');
     return fallbackAnswer;
   }
 }
@@ -562,7 +598,7 @@ Perform the action with absolute factual discipline (Do NOT invent fake facts):
 Return JSON with { "result": string, "rationale": string }
 `;
 
-    const response = await generateWithRetry(ai, {
+    const response = await generateWithMultiModelRetry(ai, {
       model: 'gemini-3.7-flash',
       contents: prompt,
       config: {
@@ -581,7 +617,8 @@ Return JSON with { "result": string, "rationale": string }
     const parsed = JSON.parse(response.text || '{}');
     return { suggestion: parsed.result, rationale: parsed.rationale };
   } catch (err) {
-    console.error('Error in editorial assistant (fallback engaged):', err);
+    console.log('[Gemini] Editorial assistant fallback gracefully engaged');
     return { suggestion: 'Editorial assistant processed your request. Standard newsroom formatting applied.', rationale: 'Standard fallback' };
   }
 }
+

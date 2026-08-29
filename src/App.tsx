@@ -10,6 +10,7 @@ import { FactCheckView } from './components/views/FactCheckView';
 import { DataAnalyzerView } from './components/views/DataAnalyzerView';
 import { SearchView } from './components/views/SearchView';
 import { TrendingView } from './components/views/TrendingView';
+import { SavedView } from './components/views/SavedView';
 import { AdminNewsroomView } from './components/views/AdminNewsroomView';
 import { CategoryView, AboutView, ContactView, PrivacyView, TermsView } from './components/views/StaticPages';
 import { CheckCircle2, AlertCircle, Info, X } from 'lucide-react';
@@ -33,6 +34,8 @@ const AppContent: React.FC = () => {
         return <SearchView />;
       case 'trending':
         return <TrendingView />;
+      case 'saved':
+        return <SavedView />;
       case 'admin':
         return <AdminNewsroomView />;
       case 'category':

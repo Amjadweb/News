@@ -1,6 +1,6 @@
 import React, { useEffect, useState } from 'react';
 import { useApp } from '../../context/AppContext';
-import { NewsArticle, FactCheckItem, TrendingTopic } from '../../types';
+import { NewsArticle, FactCheckItem, TrendingTopic, NewsSyncStatus } from '../../types';
 import { NewsCard } from '../NewsCard';
 import { StatusBadge, ConfidenceScorePill } from '../StatusBadge';
 import {
@@ -20,36 +20,49 @@ import {
   ExternalLink,
   Layers,
   FileCheck,
+  Clock,
+  Zap,
 } from 'lucide-react';
-import { fetchArticlesSafe, fetchFactChecksSafe, fetchTrendingSafe } from '../../services/api';
+import { fetchTopNewsSafe, fetchFactChecksSafe, fetchTrendingSafe, fetchSyncStatusSafe } from '../../services/api';
 
 export const HomeView: React.FC = () => {
   const { t, language, navigateTo, formatDhakaTime } = useApp();
   const [articles, setArticles] = useState<NewsArticle[]>([]);
+  const [syncStatus, setSyncStatus] = useState<NewsSyncStatus | null>(null);
   const [factChecks, setFactChecks] = useState<FactCheckItem[]>([]);
   const [trending, setTrending] = useState<TrendingTopic[]>([]);
   const [loading, setLoading] = useState(true);
+  const [refreshing, setRefreshing] = useState(false);
 
   useEffect(() => {
     fetchHomeData();
   }, []);
 
-  const fetchHomeData = async () => {
-    setLoading(true);
+  const fetchHomeData = async (isManualRefresh = false) => {
+    if (isManualRefresh) setRefreshing(true);
+    else setLoading(true);
+
     try {
-      const [fetchedArticles, fetchedFc, fetchedTrending] = await Promise.all([
-        fetchArticlesSafe(),
+      const [topNewsResult, fetchedFc, fetchedTrending, fetchedStatus] = await Promise.all([
+        fetchTopNewsSafe(20),
         fetchFactChecksSafe(),
         fetchTrendingSafe(),
+        fetchSyncStatusSafe(),
       ]);
 
-      setArticles(fetchedArticles);
+      setArticles(topNewsResult.articles);
+      if (topNewsResult.syncStatus) {
+        setSyncStatus(topNewsResult.syncStatus);
+      } else if (fetchedStatus) {
+        setSyncStatus(fetchedStatus);
+      }
       setFactChecks(fetchedFc.slice(0, 3));
       setTrending(fetchedTrending);
     } catch (err) {
       console.warn('Network notice: utilizing local verified news cache');
     } finally {
       setLoading(false);
+      setRefreshing(false);
     }
   };
 
@@ -65,7 +78,42 @@ export const HomeView: React.FC = () => {
   );
 
   return (
-    <div className="max-w-7xl mx-auto px-4 sm:px-6 lg:px-8 py-6 space-y-12">
+    <div className="max-w-7xl mx-auto px-4 sm:px-6 lg:px-8 py-6 space-y-10">
+      {/* REAL-TIME DYNAMIC ROTATION STATUS BAR */}
+      <div className="bg-slate-900/90 dark:bg-slate-950/80 border border-slate-800 rounded-xl px-4 py-2.5 flex flex-wrap items-center justify-between gap-3 text-xs text-slate-300 shadow-sm backdrop-blur-xs">
+        <div className="flex items-center gap-2.5">
+          <span className="flex h-2.5 w-2.5 relative">
+            <span className="animate-ping absolute inline-flex h-full w-full rounded-full bg-emerald-400 opacity-75"></span>
+            <span className="relative inline-flex rounded-full h-2.5 w-2.5 bg-emerald-500"></span>
+          </span>
+          <span className="font-semibold text-white">Live News Rotation Pipeline Active</span>
+          <span className="hidden sm:inline text-slate-500">•</span>
+          <span className="hidden sm:inline text-slate-400">
+            {syncStatus ? `${syncStatus.activeCount ?? syncStatus.activeArticlesCount ?? 0} stories live (${syncStatus.activeSources ?? syncStatus.activeSourcesCount ?? 0} sources)` : 'Auto-updates every 15 min'}
+          </span>
+          <span className="hidden md:inline text-slate-500">•</span>
+          <span className="hidden md:inline text-slate-400">
+            12-Hour Expiration Active
+          </span>
+        </div>
+
+        <div className="flex items-center gap-3 ml-auto">
+          {(syncStatus?.lastSyncTime || syncStatus?.lastSyncCompletedAt) && (
+            <span className="text-[11px] text-slate-400 font-mono hidden lg:inline">
+              Updated: {new Date(syncStatus.lastSyncTime || syncStatus.lastSyncCompletedAt!).toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' })}
+            </span>
+          )}
+          <button
+            onClick={() => fetchHomeData(true)}
+            disabled={refreshing}
+            className="inline-flex items-center gap-1.5 px-2.5 py-1 rounded-lg bg-slate-800 hover:bg-slate-700 text-slate-200 hover:text-white text-[11px] font-semibold transition-colors disabled:opacity-50"
+          >
+            <RefreshCw className={`w-3 h-3 ${refreshing ? 'animate-spin text-emerald-400' : ''}`} />
+            <span>{refreshing ? 'Syncing...' : 'Refresh Feed'}</span>
+          </button>
+        </div>
+      </div>
+
       {/* 1. TOP BREAKING & VERIFIED SPOTLIGHT HERO */}
       {featuredArticle && (
         <section className="relative overflow-hidden rounded-2xl bg-gradient-to-br from-slate-950 via-slate-900 to-slate-950 border border-slate-800 text-white p-6 sm:p-8 shadow-xl">
@@ -171,7 +219,7 @@ export const HomeView: React.FC = () => {
         </section>
       )}
 
-      {/* 2. TODAY'S TOP VERIFIED STORIES GRID */}
+      {/* 2. TODAY'S TOP DYNAMICALLY RANKED STORIES GRID (TOP 6 OF TOP 20) */}
       <section className="space-y-4">
         <div className="flex items-center justify-between border-b border-slate-200 dark:border-slate-800 pb-3">
           <div className="flex items-center gap-2">
@@ -179,12 +227,15 @@ export const HomeView: React.FC = () => {
             <h2 className="text-xl font-bold text-slate-900 dark:text-white tracking-tight">
               {t.todaysNews}
             </h2>
+            <span className="text-xs px-2 py-0.5 rounded-full bg-emerald-100 text-emerald-800 dark:bg-emerald-950 dark:text-emerald-300 font-bold hidden sm:inline-block">
+              Top Ranked Feed
+            </span>
           </div>
           <button
             onClick={() => navigateTo('today')}
             className="text-xs font-semibold text-emerald-600 dark:text-emerald-400 hover:underline flex items-center gap-1"
           >
-            <span>{t.exploreAllNews}</span>
+            <span>{t.exploreAllNews} ({articles.length})</span>
             <ArrowRight className="w-3.5 h-3.5" />
           </button>
         </div>
@@ -216,9 +267,15 @@ export const HomeView: React.FC = () => {
           </div>
 
           <div className="space-y-4">
-            {bangladeshNews.map((art) => (
-              <NewsCard key={art.id} article={art} layout="horizontal" />
-            ))}
+            {bangladeshNews.length > 0 ? (
+              bangladeshNews.slice(0, 4).map((art) => (
+                <NewsCard key={art.id} article={art} layout="horizontal" />
+              ))
+            ) : (
+              <div className="p-8 text-center text-sm text-slate-500 bg-slate-50 dark:bg-slate-900 rounded-xl border border-slate-200 dark:border-slate-800">
+                No active Bangladesh stories at this sync cycle. Ingestion is scheduled to fetch updates shortly.
+              </div>
+            )}
           </div>
         </div>
 
@@ -299,15 +356,12 @@ export const HomeView: React.FC = () => {
                           : 'bg-amber-100 text-amber-800 dark:bg-amber-950 dark:text-amber-300'
                       }`}
                     >
-                      Verdict: {fc.verdict}
+                      {fc.verdict}
                     </span>
-                    <span className="text-[10px] text-slate-700 dark:text-slate-300 font-medium">
-                      {fc.confidenceScore}% Confidence
-                    </span>
+                    <span className="text-[10px] text-slate-400 font-mono">{fc.category}</span>
                   </div>
-
-                  <p className="text-xs font-semibold text-slate-900 dark:text-slate-100 line-clamp-2">
-                    "{fc.claim}"
+                  <p className="text-xs font-semibold text-slate-800 dark:text-slate-200 line-clamp-2">
+                    {language === 'bn' && fc.claimBn ? fc.claimBn : fc.claim}
                   </p>
                 </div>
               ))}
@@ -316,122 +370,57 @@ export const HomeView: React.FC = () => {
         </div>
       </section>
 
-      {/* 4. DATA ANALYZER AI INTERACTIVE CTA BANNER */}
-      <section className="rounded-2xl bg-gradient-to-r from-slate-950 via-emerald-950 to-slate-950 text-white p-6 sm:p-8 border border-emerald-800/40 shadow-xl relative overflow-hidden">
-        <div className="max-w-3xl space-y-3 relative z-10">
-          <div className="inline-flex items-center gap-2 px-3 py-1 rounded-full bg-emerald-500/20 text-emerald-300 text-xs font-semibold border border-emerald-500/30">
-            <Database className="w-3.5 h-3.5" />
-            <span>Autonomous Tabular Profiling & Data Truth Verification</span>
-          </div>
-
-          <h2 className="text-2xl sm:text-3xl font-extrabold tracking-tight">
-            {t.dataAnalyzerCTA}
-          </h2>
-
-          <p className="text-xs sm:text-sm text-slate-300 leading-relaxed">
-            {t.dataAnalyzerSubtitle}
-          </p>
-
-          <div className="pt-2 flex flex-wrap items-center gap-3">
+      {/* 4. TECHNOLOGY & AI FRONTIERS */}
+      {techAndAINews.length > 0 && (
+        <section className="space-y-4">
+          <div className="flex items-center justify-between border-b border-slate-200 dark:border-slate-800 pb-3">
+            <div className="flex items-center gap-2">
+              <Cpu className="w-5 h-5 text-indigo-600 dark:text-indigo-400" />
+              <h2 className="text-xl font-bold text-slate-900 dark:text-white tracking-tight">
+                AI & Technology Frontiers
+              </h2>
+            </div>
             <button
-              onClick={() => navigateTo('analyzer')}
-              className="bg-emerald-500 hover:bg-emerald-400 text-slate-950 font-bold px-5 py-2.5 rounded-xl text-xs sm:text-sm shadow-md transition-transform hover:scale-105 active:scale-95 flex items-center gap-2"
+              onClick={() => navigateTo('category', { category: 'Technology' })}
+              className="text-xs font-semibold text-emerald-600 dark:text-emerald-400 hover:underline"
             >
-              <Database className="w-4 h-4" />
-              <span>{t.uploadCTA}</span>
-            </button>
-
-            <button
-              onClick={() => navigateTo('analyzer', { preloaded: 'sales' })}
-              className="bg-slate-900/80 hover:bg-slate-800 text-slate-200 border border-slate-700 font-medium px-4 py-2.5 rounded-xl text-xs transition-colors"
-            >
-              Test with Global Tech Trade Data →
+              {t.exploreAllNews}
             </button>
           </div>
-        </div>
-      </section>
 
-      {/* 5. TECH & ARTIFICIAL INTELLIGENCE SECTION */}
-      <section className="space-y-4">
-        <div className="flex items-center justify-between border-b border-slate-200 dark:border-slate-800 pb-3">
-          <div className="flex items-center gap-2">
-            <Cpu className="w-5 h-5 text-teal-600 dark:text-teal-400" />
-            <h2 className="text-xl font-bold text-slate-900 dark:text-white tracking-tight">
-              {t.techAndAI}
-            </h2>
+          <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-3 gap-6">
+            {techAndAINews.slice(0, 3).map((art) => (
+              <NewsCard key={art.id} article={art} layout="standard" />
+            ))}
           </div>
-          <button
-            onClick={() => navigateTo('category', { category: 'Artificial Intelligence' })}
-            className="text-xs font-semibold text-emerald-600 dark:text-emerald-400 hover:underline"
-          >
-            {t.exploreAllNews}
-          </button>
-        </div>
+        </section>
+      )}
 
-        <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-3 gap-6">
-          {techAndAINews.map((art) => (
-            <NewsCard key={art.id} article={art} layout="standard" />
-          ))}
-        </div>
-      </section>
-
-      {/* 6. HOW TRUTHPULSE AI WORKS (TRUST & TRANSPARENCY SECTION) */}
-      <section className="bg-slate-50 dark:bg-slate-900/60 rounded-2xl border border-slate-200 dark:border-slate-800 p-6 sm:p-8 space-y-6">
-        <div className="text-center max-w-2xl mx-auto space-y-2">
-          <div className="inline-flex items-center gap-1.5 text-xs font-bold uppercase tracking-wider text-emerald-600 dark:text-emerald-400">
-            <ShieldCheck className="w-4 h-4" />
-            <span>Editorial Architecture</span>
-          </div>
-          <h2 className="text-2xl font-bold text-slate-900 dark:text-white">
-            {t.howItWorksTitle}
-          </h2>
-          <p className="text-xs sm:text-sm text-slate-600 dark:text-slate-300">
-            TruthPulse AI operates under a multi-stage verification pipeline ensuring every story, claim, and dataset is cross-checked against accredited sources before certification.
-          </p>
-        </div>
-
-        <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-4 gap-4 pt-2">
-          <div className="bg-white dark:bg-slate-800 p-4 rounded-xl border border-slate-200/80 dark:border-slate-700/80 space-y-2">
-            <span className="w-7 h-7 rounded-lg bg-emerald-100 text-emerald-800 dark:bg-emerald-950 dark:text-emerald-300 text-xs font-bold flex items-center justify-center">
-              1
-            </span>
-            <h4 className="text-sm font-bold text-slate-900 dark:text-white">Source Collection</h4>
-            <p className="text-xs text-slate-600 dark:text-slate-300 leading-relaxed">
-              Automated ingestion from accredited official APIs, RSS wires, and public datasets.
-            </p>
+      {/* 5. GLOBAL & INTERNATIONAL DISPATCHES */}
+      {worldNews.length > 0 && (
+        <section className="space-y-4">
+          <div className="flex items-center justify-between border-b border-slate-200 dark:border-slate-800 pb-3">
+            <div className="flex items-center gap-2">
+              <Globe2 className="w-5 h-5 text-teal-600 dark:text-teal-400" />
+              <h2 className="text-xl font-bold text-slate-900 dark:text-white tracking-tight">
+                Global Dispatches
+              </h2>
+            </div>
+            <button
+              onClick={() => navigateTo('category', { category: 'International' })}
+              className="text-xs font-semibold text-emerald-600 dark:text-emerald-400 hover:underline"
+            >
+              {t.exploreAllNews}
+            </button>
           </div>
 
-          <div className="bg-white dark:bg-slate-800 p-4 rounded-xl border border-slate-200/80 dark:border-slate-700/80 space-y-2">
-            <span className="w-7 h-7 rounded-lg bg-teal-100 text-teal-800 dark:bg-teal-950 dark:text-teal-300 text-xs font-bold flex items-center justify-center">
-              2
-            </span>
-            <h4 className="text-sm font-bold text-slate-900 dark:text-white">Event Deduplication</h4>
-            <p className="text-xs text-slate-600 dark:text-slate-300 leading-relaxed">
-              Multi-source clustering combines corroborating coverage into unified Event Groups.
-            </p>
+          <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-3 gap-6">
+            {worldNews.slice(0, 3).map((art) => (
+              <NewsCard key={art.id} article={art} layout="standard" />
+            ))}
           </div>
-
-          <div className="bg-white dark:bg-slate-800 p-4 rounded-xl border border-slate-200/80 dark:border-slate-700/80 space-y-2">
-            <span className="w-7 h-7 rounded-lg bg-purple-100 text-purple-800 dark:bg-purple-950 dark:text-purple-300 text-xs font-bold flex items-center justify-center">
-              3
-            </span>
-            <h4 className="text-sm font-bold text-slate-900 dark:text-white">AI Claim Extraction</h4>
-            <p className="text-xs text-slate-600 dark:text-slate-300 leading-relaxed">
-              Synthesizes key assertions, calculates confidence metrics, and flags potential contradictions.
-            </p>
-          </div>
-
-          <div className="bg-white dark:bg-slate-800 p-4 rounded-xl border border-slate-200/80 dark:border-slate-700/80 space-y-2">
-            <span className="w-7 h-7 rounded-lg bg-slate-900 text-white dark:bg-slate-700 dark:text-slate-200 text-xs font-bold flex items-center justify-center">
-              4
-            </span>
-            <h4 className="text-sm font-bold text-slate-900 dark:text-white">Editorial Review</h4>
-            <p className="text-xs text-slate-600 dark:text-slate-300 leading-relaxed">
-              Human newsroom oversight audits high-risk items prior to final publishing.
-            </p>
-          </div>
-        </div>
-      </section>
+        </section>
+      )}
     </div>
   );
 };
